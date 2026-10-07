@@ -180,14 +180,18 @@ async function handle(opts: {
   } catch (err: any) {
     clearInterval(typingTimer);
     console.error("[index] Agent error:", err?.message, err?.stack);
-    await replyTo(classifyError(err?.message ?? "unknown error"));
+    await replyTo(classifyError(err?.message ?? "unknown error", attachments.length > 0));
   } finally {
     releaseSlot();
   }
 }
 
-function classifyError(msg: string): string {
+function classifyError(msg: string, hadAttachment = false): string {
   const lower = msg.toLowerCase();
+  // An attachment is work the user cannot cheaply repeat: they have to find the
+  // photo again, and by then the meal is gone. Say what was lost and what to do.
+  if (hadAttachment && lower.includes("process exited with code"))
+    return "I could not open that photo, the run died before it started. Send the image again and I will have another go.";
   if (lower.includes("usage limit") || lower.includes("credit balance is too low"))
     return "I have hit the Claude subscription usage limit. It resets on a rolling window, so try again shortly.";
   if (lower.includes("timeout") || lower.includes("timed out"))
@@ -211,19 +215,28 @@ async function downloadAttachment(
   mediaType: string,
   declaredSize: number | undefined,
 ): Promise<Attachment | null> {
+  // Every bail-out below logs its reason. A dropped attachment is invisible in the
+  // reply (the model simply never sees the image and answers the text alone), so
+  // the log is the only place the drop is recorded.
+  const drop = (reason: string): null => {
+    console.warn(`[index] Attachment dropped (${mediaType}): ${reason}`);
+    return null;
+  };
   try {
-    if (declaredSize && declaredSize > MAX_ATTACHMENT_BYTES) return null;
+    if (declaredSize && declaredSize > MAX_ATTACHMENT_BYTES)
+      return drop(`declared ${declaredSize} bytes, over the ${MAX_ATTACHMENT_BYTES} limit`);
     const file = await bot.api.getFile(fileId);
-    if (!file.file_path) return null;
+    if (!file.file_path) return drop("Telegram returned no file_path");
     const url = `https://api.telegram.org/file/bot${config.telegramBotToken}/${file.file_path}`;
     const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-    if (!res.ok) return null;
+    if (!res.ok) return drop(`download returned HTTP ${res.status}`);
     const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.byteLength > MAX_ATTACHMENT_BYTES) return null;
+    if (buf.byteLength > MAX_ATTACHMENT_BYTES)
+      return drop(`${buf.byteLength} bytes downloaded, over the ${MAX_ATTACHMENT_BYTES} limit`);
+    console.log(`[index] Attachment ready: ${mediaType}, ${Math.round(buf.byteLength / 1024)}KB`);
     return { mediaType, data: buf.toString("base64") };
   } catch (err) {
-    console.warn("[index] Attachment download failed:", (err as Error).message);
-    return null;
+    return drop(`download failed: ${(err as Error).message}`);
   }
 }
 

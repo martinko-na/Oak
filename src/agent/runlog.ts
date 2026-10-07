@@ -26,6 +26,13 @@ import { redactSecrets } from "../util/redact.js";
 /** How much of the final reply is kept as a sample of the run's outcome. */
 const OUTCOME_CHARS = 200;
 
+/**
+ * How much CLI stderr is kept on a failed run. Generous compared with the
+ * outcome sample: when the subprocess dies before it ever opens a session, its
+ * stderr is the only evidence of why, and a stack trace needs room.
+ */
+const STDERR_CHARS = 4000;
+
 export type RunSource = "telegram" | "scheduled";
 
 export interface ModelUsageSummary {
@@ -56,6 +63,16 @@ export interface RunRecord {
   permissionDenials?: number;
   attempt: number;
   outcome?: string;
+  /** What the message carried, so an attachment-shaped failure is recognisable. */
+  attachments?: AttachmentSummary[];
+  /** Tail of the CLI subprocess's stderr. Only written on a failed run. */
+  stderr?: string;
+}
+
+/** Shape, type and size of one inbound attachment. Never the bytes themselves. */
+export interface AttachmentSummary {
+  mediaType: string;
+  bytes: number;
 }
 
 function runLogFile(): string {
@@ -113,6 +130,7 @@ export async function appendRunRecord(record: RunRecord): Promise<void> {
       chatId: record.chatId ? redactSecrets(record.chatId) : undefined,
       userLabel: record.userLabel ? redactSecrets(record.userLabel) : undefined,
       outcome: outcomeSample(record.outcome),
+      stderr: record.stderr ? redactSecrets(record.stderr).slice(-STDERR_CHARS) : undefined,
     };
     const file = runLogFile();
     await fsp.mkdir(path.dirname(file), { recursive: true });

@@ -6,8 +6,15 @@ import { googleCalendarConfigured } from "../calendar/status.js";
 import { config } from "../config.js";
 import { type Attachment, buildUserContent } from "../media/attachments.js";
 import { notionConfigured } from "../notion/status.js";
+import { redactSecrets } from "../util/redact.js";
 import { personaSystemPrompt, pickPersonality } from "./personalities.js";
-import { type RunRecord, appendRunRecord, summariseModelUsage, summariseUsage } from "./runlog.js";
+import {
+  type AttachmentSummary,
+  type RunRecord,
+  appendRunRecord,
+  summariseModelUsage,
+  summariseUsage,
+} from "./runlog.js";
 import { clearSession, getSession, setSession } from "./sessions.js";
 
 /**
@@ -72,6 +79,33 @@ export interface AgentResponse {
 // Whole-query retry for transient startup failures.
 const MAX_QUERY_ATTEMPTS = 3;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** How much CLI stderr is held in memory per attempt before the head is dropped. */
+const STDERR_BUFFER_CHARS = 16_000;
+
+/**
+ * Describe the attachments on a message without copying their bytes. Base64
+ * payloads run to megabytes, so only the type and decoded size are ever logged.
+ */
+function summariseAttachments(attachments?: Attachment[]): AttachmentSummary[] | undefined {
+  if (!attachments?.length) return undefined;
+  return attachments.map((a) => ({
+    mediaType: a.mediaType,
+    // 4 base64 chars per 3 bytes, minus whatever padding the tail carries.
+    bytes:
+      Math.floor((a.data.length * 3) / 4) -
+      (a.data.endsWith("==") ? 2 : a.data.endsWith("=") ? 1 : 0),
+  }));
+}
+
+/**
+ * The SDK's message when the CLI subprocess dies before it reports anything.
+ * These carry no cause of their own, which is exactly why the subprocess's
+ * stderr is captured: see the `stderr` option on the query below.
+ */
+function isProcessExit(msg: string): boolean {
+  return /claude code process exited with code/i.test(msg);
+}
 
 /** The Claude subscription cap (reset on a rolling window), not a transient limit. */
 function isUsageLimit(msg: string): boolean {
@@ -184,8 +218,14 @@ export async function runAgent(opts: {
   const persona = pickPersonality(chatId);
   const personaAppend = personaSystemPrompt(persona);
 
+  const attachmentSummary = summariseAttachments(attachments);
+  // The attachment shape is part of the request, so it belongs in the start line:
+  // an image-only message logs an empty text, which on its own reads as a no-op.
+  const attachmentNote = attachmentSummary
+    ? ` [${attachmentSummary.map((a) => `${a.mediaType} ${Math.round(a.bytes / 1024)}KB`).join(", ")}]`
+    : "";
   console.log(
-    `[agent] Starting query (${model}, ${modelTier}, persona=${persona.id}):`,
+    `[agent] Starting query (${model}, ${modelTier}, persona=${persona.id}${existingSession ? ", resumed" : ", new"})${attachmentNote}:`,
     userMessage.slice(0, 100),
   );
 
@@ -201,6 +241,17 @@ export async function runAgent(opts: {
     const startedAt = Date.now();
     const toolCounts: Record<string, number> = {};
     let resultMessage: any;
+    // The CLI subprocess's own stderr. When query() rejects with a bare exit code
+    // this is the only account of what went wrong, so it is kept per attempt and
+    // written to the run record on failure. Head-trimmed, not tail-trimmed: the
+    // last lines before the exit are the interesting ones.
+    let stderrBuffer = "";
+    const captureStderr = (chunk: string) => {
+      stderrBuffer += chunk;
+      if (stderrBuffer.length > STDERR_BUFFER_CHARS) {
+        stderrBuffer = stderrBuffer.slice(-STDERR_BUFFER_CHARS);
+      }
+    };
 
     /** Fire-and-forget run record. Never awaited, never allowed to throw. */
     const logRun = (isError: boolean, errorMessage?: string) => {
@@ -228,6 +279,9 @@ export async function runAgent(opts: {
             : undefined,
           attempt: attempt + 1,
           outcome: errorMessage ?? resultText,
+          attachments: attachmentSummary,
+          // Only on failure: a healthy run's stderr is noise, and it can be long.
+          stderr: isError && stderrBuffer.trim() ? stderrBuffer : undefined,
         };
         void appendRunRecord(record);
       } catch (logErr) {
@@ -272,6 +326,7 @@ export async function runAgent(opts: {
           maxTurns: modelTier === "fast" ? 15 : 60,
           plugins: [{ type: "local", path: path.join(PROJECT_ROOT, "coach-plugin") }],
           forwardSubagentText: onProgress != null,
+          stderr: captureStderr,
         },
       })) {
         if (message.type === "system" && message.subtype === "init") {
@@ -320,7 +375,17 @@ export async function runAgent(opts: {
       return { text: resultText, sessionId };
     } catch (err: any) {
       const msg = err?.message ?? String(err);
-      console.error("[agent] query() threw:", msg);
+      console.error(
+        `[agent] query() threw after ${Date.now() - startedAt}ms (attempt ${attempt + 1}, session ${sessionId ?? "none"}${attachmentNote}):`,
+        msg,
+      );
+      // Print the subprocess's own output too. Without this an exit code is all
+      // that reaches the journal, and the cause is gone for good.
+      if (stderrBuffer.trim()) {
+        console.error("[agent] CLI stderr tail:\n", redactSecrets(stderrBuffer).slice(-4000));
+      } else if (isProcessExit(msg)) {
+        console.error("[agent] CLI produced no stderr before exiting.");
+      }
       logRun(true, msg);
 
       // Subscription usage limit hit. Return a clear message rather than throwing.
@@ -337,10 +402,18 @@ export async function runAgent(opts: {
       // Transient failure before the agent started (no session id yet, so no tool
       // side effects have run): safe to retry with backoff. Once a session is
       // established we do not blind-retry, to avoid duplicate Notion writes.
-      if (isTransient(msg) && sessionId === undefined && attempt < MAX_QUERY_ATTEMPTS - 1) {
+      //
+      // A bare subprocess exit counts here. It is how a failed CLI startup
+      // surfaces (observed twice on 2026-10-07, both times on a photo message,
+      // both times dead inside 300ms and both times fine on the user's own
+      // immediate retry), and with no session id it is as side-effect-free as a
+      // network error. Retrying costs a second; making the user re-send a photo
+      // and get nothing back costs them the meal they were logging.
+      const retryable = isTransient(msg) || isProcessExit(msg);
+      if (retryable && sessionId === undefined && attempt < MAX_QUERY_ATTEMPTS - 1) {
         const waitMs = Math.min(2 ** attempt, 8) * 1000;
         console.warn(
-          `[agent] transient error; retry ${attempt + 1}/${MAX_QUERY_ATTEMPTS - 1} in ${waitMs}ms`,
+          `[agent] ${isProcessExit(msg) ? "CLI exited before starting" : "transient error"}; retry ${attempt + 1}/${MAX_QUERY_ATTEMPTS - 1} in ${waitMs}ms`,
         );
         await sleep(waitMs);
         continue;
