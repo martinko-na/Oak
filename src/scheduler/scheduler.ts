@@ -153,25 +153,24 @@ export async function executeTask(task: ScheduledTask): Promise<void> {
 }
 
 export function addTask(task: ScheduledTask): void {
-  if (definitions.some((t) => t.id === task.id)) {
-    console.warn(`[scheduler] Task id "${task.id}" already exists; replacing it.`);
-  }
+  const replacing = definitions.some((t) => t.id === task.id);
   definitions = [...definitions.filter((t) => t.id !== task.id), task];
-  // Only start a live croner job in polling mode; webhook mode is fired externally.
-  if (config.mode === "polling") startTask(task);
+  // Only run a live croner job in polling mode (webhook mode is fired
+  // externally), and only for an enabled task. Either way this id's previous
+  // job must stop: startTask does that itself, and replacing a live task with a
+  // disabled one has to tear it down here or it keeps firing.
+  if (config.mode === "polling" && task.enabled) startTask(task);
+  else stopJob(task.id);
   persist();
-  console.log(`[scheduler] Added task: ${task.name} (${task.runAt ?? task.cron})`);
+  const verb = replacing ? "Replaced" : "Added";
+  console.log(`[scheduler] ${verb} task: ${task.name} (${task.runAt ?? task.cron})`);
 }
 
 export function removeTask(taskId: string): boolean {
   const existed = definitions.some((t) => t.id === taskId);
   definitions = definitions.filter((t) => t.id !== taskId);
-  const entry = tasks.get(taskId);
-  if (entry) {
-    entry.job.stop();
-    tasks.delete(taskId);
-  }
-  if (!existed && !entry) return false;
+  const wasRunning = stopJob(taskId);
+  if (!existed && !wasRunning) return false;
   persist();
   console.log(`[scheduler] Removed task: ${taskId}`);
   return true;
@@ -181,7 +180,24 @@ export function listTasks(): ScheduledTask[] {
   return definitions;
 }
 
+/**
+ * Stop and forget the live croner job for `taskId`, if any. Reports whether one
+ * was running.
+ */
+function stopJob(taskId: string): boolean {
+  const entry = tasks.get(taskId);
+  if (!entry) return false;
+  entry.job.stop();
+  tasks.delete(taskId);
+  return true;
+}
+
 function startTask(task: ScheduledTask): void {
+  // Replacing a task must stop its old schedule first: `tasks.set` below only
+  // overwrites the map entry, leaving any previous Cron running and firing, so
+  // without this a re-added id fires once per schedule it ever had.
+  stopJob(task.id);
+
   switch (oneShotDisposition(task)) {
     case null: {
       const job = new Cron(task.cron, { timezone: config.timezone }, () => executeTask(task));

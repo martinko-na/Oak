@@ -260,3 +260,48 @@ test("after a restart, a recently missed one-shot fires and a stale one is dropp
   );
   scheduler.removeTask("morning"); // stop the live cron job so the test exits
 });
+
+test("re-adding an id reschedules the task instead of running both schedules", async () => {
+  const scheduler = await loadScheduler({ mode: "polling" });
+  await scheduler.initScheduler();
+
+  // A seconds-level cron, so the job really fires inside the test. The two
+  // versions carry different prompts: that is what makes this deterministic
+  // regardless of how many ticks elapse. Replacing an id used to leave the
+  // first croner job running, so every tick fired both prompts.
+  scheduler.addTask(task({ cron: "* * * * * *", prompt: "Stale." }));
+  scheduler.addTask(task({ cron: "* * * * * *", prompt: "Current." }));
+
+  await waitFor(() => agentCalls.length >= 1);
+  await new Promise((r) => setTimeout(r, 1200)); // let another tick or two land
+  const firedPrompts = [...new Set(agentCalls.map((c) => c.userMessage))];
+  const callsBeforeRemoval = agentCalls.length;
+
+  assert.equal(scheduler.removeTask("morning"), true); // also stops the live job
+  assert.deepEqual(firedPrompts, ["Current."]);
+  assert.equal(scheduler.listTasks().length, 0);
+
+  await new Promise((r) => setTimeout(r, 1200));
+  assert.equal(agentCalls.length, callsBeforeRemoval);
+});
+
+test("a disabled task is not scheduled, and disabling a live one stops it", async () => {
+  const scheduler = await loadScheduler({ mode: "polling" });
+  await scheduler.initScheduler();
+
+  // addTask used to start a job whatever `enabled` said, so a task added
+  // disabled still fired until the next restart.
+  scheduler.addTask(task({ id: "off", cron: "* * * * * *", enabled: false }));
+  await new Promise((r) => setTimeout(r, 1200));
+  assert.equal(agentCalls.length, 0);
+  assert.equal(scheduler.getTask("off").enabled, false); // persisted, just not running
+
+  // Disabling a task that is already live has to stop its job too.
+  scheduler.addTask(task({ id: "on", cron: "* * * * * *" }));
+  await waitFor(() => agentCalls.length >= 1);
+  scheduler.addTask(task({ id: "on", cron: "* * * * * *", enabled: false }));
+  const callsWhenDisabled = agentCalls.length;
+
+  await new Promise((r) => setTimeout(r, 1200));
+  assert.equal(agentCalls.length, callsWhenDisabled);
+});
