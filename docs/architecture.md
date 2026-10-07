@@ -39,7 +39,7 @@ generic while the running agent is personalised to you.
 | `src/config.ts` | Central env-driven configuration. |
 | `src/agent/` | The agent loop (`runner.ts`), persona overlays (`personalities.ts`), and per-chat session store (`sessions.ts`). |
 | `src/channel/` | Telegram transport: `notify.ts` (send), `format.ts` (markdown→HTML, em-dash strip), `webhook-server.ts`, `permissions.ts` (allowlist). |
-| `src/media/` | Inbound media: `attachments.ts` (images/PDFs → content blocks), `transcribe.ts` (voice notes → text). |
+| `src/media/` | Inbound media: `attachments.ts` (images/PDFs → staged files the agent Reads), `transcribe.ts` (voice notes → text). |
 | `src/notion/` | `status.ts` reports whether Notion is configured (a `NOTION_TOKEN` is set). All Notion I/O goes through `scripts/notion.mjs` via Bash. |
 | `src/scheduler/` | `scheduler.ts` (croner reminders) and `server.ts` (the localhost control plane). |
 | `src/util/` | `redact.ts` (secret scrubbing) and `dedupe.ts` (webhook idempotency). |

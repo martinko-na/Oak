@@ -28,9 +28,11 @@ skills and `CLAUDE.md`.
 ## Vision: photos and PDFs
 
 Send a meal, a food label, a gym machine, or a progress picture. Images and PDFs
-are turned into model content blocks (`src/media/attachments.ts`) so the coach can
-read a label, estimate a meal, identify a movement, or comment on a setup, then
-tie it back to your goals.
+are staged to a file that the agent opens with Read (`src/media/attachments.ts`), so
+the coach can read a label, estimate a meal, identify a movement, or comment on a
+setup, then tie it back to your goals. They are staged rather than inlined into the
+message because the CLI rejects an over-long stdin line, which is what a base64
+photo produces; that module documents the measured sizes.
 
 ## Voice notes
 

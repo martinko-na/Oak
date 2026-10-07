@@ -4,7 +4,13 @@ import { fileURLToPath } from "node:url";
 import { type SDKUserMessage, query } from "@anthropic-ai/claude-agent-sdk";
 import { googleCalendarConfigured } from "../calendar/status.js";
 import { config } from "../config.js";
-import { type Attachment, buildUserContent } from "../media/attachments.js";
+import {
+  type Attachment,
+  type StagedAttachment,
+  attachmentPrompt,
+  discardStaged,
+  stageAttachments,
+} from "../media/attachments.js";
 import { notionConfigured } from "../notion/status.js";
 import { redactSecrets } from "../util/redact.js";
 import { personaSystemPrompt, pickPersonality } from "./personalities.js";
@@ -12,6 +18,7 @@ import {
   type AttachmentSummary,
   type RunRecord,
   appendRunRecord,
+  condenseStderr,
   summariseModelUsage,
   summariseUsage,
 } from "./runlog.js";
@@ -19,19 +26,14 @@ import { clearSession, getSession, setSession } from "./sessions.js";
 
 /**
  * Single-message stream. The SDK takes the prompt as an async iterable of user
- * messages, which is what lets us attach images and PDFs (a content blocks array)
- * rather than only plain text.
+ * messages. The content is always a plain string: attachments reach the model as
+ * staged files it Reads, never as inline base64, because a large inline payload
+ * kills the CLI's stdin parser (see src/media/attachments.ts).
  */
-async function* singleMessage(
-  text: string,
-  attachments?: Attachment[],
-): AsyncIterable<SDKUserMessage> {
+async function* singleMessage(text: string): AsyncIterable<SDKUserMessage> {
   yield {
     type: "user",
-    message: {
-      role: "user",
-      content: buildUserContent(text, attachments) as SDKUserMessage["message"]["content"],
-    },
+    message: { role: "user", content: text },
     parent_tool_use_id: null,
     session_id: "",
   };
@@ -84,18 +86,12 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const STDERR_BUFFER_CHARS = 16_000;
 
 /**
- * Describe the attachments on a message without copying their bytes. Base64
- * payloads run to megabytes, so only the type and decoded size are ever logged.
+ * Describe what the message carried without copying any of it. Only the type and
+ * size are ever logged, never the bytes or the staged path's contents.
  */
-function summariseAttachments(attachments?: Attachment[]): AttachmentSummary[] | undefined {
-  if (!attachments?.length) return undefined;
-  return attachments.map((a) => ({
-    mediaType: a.mediaType,
-    // 4 base64 chars per 3 bytes, minus whatever padding the tail carries.
-    bytes:
-      Math.floor((a.data.length * 3) / 4) -
-      (a.data.endsWith("==") ? 2 : a.data.endsWith("=") ? 1 : 0),
-  }));
+function summariseAttachments(staged: StagedAttachment[]): AttachmentSummary[] | undefined {
+  if (staged.length === 0) return undefined;
+  return staged.map((s) => ({ mediaType: s.mediaType, bytes: s.bytes }));
 }
 
 /**
@@ -197,15 +193,39 @@ function buildSessionContext(): string {
  * the environment, not passed here) combined with the claude_code system prompt
  * preset. Do not set ANTHROPIC_API_KEY or queries will bill the metered API.
  */
-export async function runAgent(opts: {
+export interface RunAgentOptions {
   userMessage: string;
   chatId: string;
   userLabel?: string;
   modelTier?: ModelTier;
   attachments?: Attachment[];
   onProgress?: (text: string) => void;
-}): Promise<AgentResponse> {
-  const { userMessage, chatId, userLabel, attachments, onProgress } = opts;
+}
+
+/** Where inbound photos and PDFs are staged for the agent to Read. */
+function stagingDir(): string {
+  return path.join(path.dirname(config.sessionFile), "inbox");
+}
+
+/**
+ * Stage any attachments, run the agent, then clean the staged files up. The
+ * cleanup has to outlive the retry loop (every attempt Reads the same files) but
+ * must happen however the run ends, hence the wrapper.
+ */
+export async function runAgent(opts: RunAgentOptions): Promise<AgentResponse> {
+  const staged = await stageAttachments(opts.attachments, stagingDir());
+  try {
+    return await runStagedAgent(opts, staged);
+  } finally {
+    await discardStaged(staged);
+  }
+}
+
+async function runStagedAgent(
+  opts: RunAgentOptions,
+  staged: StagedAttachment[],
+): Promise<AgentResponse> {
+  const { userMessage, chatId, userLabel, onProgress } = opts;
   const modelTier = opts.modelTier ?? "standard";
   const existingSession = getSession(chatId);
 
@@ -213,12 +233,12 @@ export async function runAgent(opts: {
 
   const now = new Date().toLocaleString("en-GB", { timeZone: config.timezone });
   const context = buildSessionContext();
-  const prompt = `[Telegram chat ${chatId}${userLabel ? ` | ${userLabel}` : ""} | local time: ${now} (${config.timezone})]\n[context: ${context}]\n${userMessage}`;
+  const prompt = `[Telegram chat ${chatId}${userLabel ? ` | ${userLabel}` : ""} | local time: ${now} (${config.timezone})]\n[context: ${context}]\n${userMessage}${attachmentPrompt(staged)}`;
 
   const persona = pickPersonality(chatId);
   const personaAppend = personaSystemPrompt(persona);
 
-  const attachmentSummary = summariseAttachments(attachments);
+  const attachmentSummary = summariseAttachments(staged);
   // The attachment shape is part of the request, so it belongs in the start line:
   // an image-only message logs an empty text, which on its own reads as a no-op.
   const attachmentNote = attachmentSummary
@@ -243,14 +263,16 @@ export async function runAgent(opts: {
     let resultMessage: any;
     // The CLI subprocess's own stderr. When query() rejects with a bare exit code
     // this is the only account of what went wrong, so it is kept per attempt and
-    // written to the run record on failure. Head-trimmed, not tail-trimmed: the
-    // last lines before the exit are the interesting ones.
+    // written to the run record on failure.
+    //
+    // Keep the head, not the tail. The CLI puts its message first and then echoes
+    // the input that provoked it, which for an attachment is hundreds of KB of
+    // base64: a tail-trimmed buffer threw away the one line that mattered and kept
+    // the noise. Stop accumulating once the head is full.
     let stderrBuffer = "";
     const captureStderr = (chunk: string) => {
-      stderrBuffer += chunk;
-      if (stderrBuffer.length > STDERR_BUFFER_CHARS) {
-        stderrBuffer = stderrBuffer.slice(-STDERR_BUFFER_CHARS);
-      }
+      if (stderrBuffer.length >= STDERR_BUFFER_CHARS) return;
+      stderrBuffer += chunk.slice(0, STDERR_BUFFER_CHARS - stderrBuffer.length);
     };
 
     /** Fire-and-forget run record. Never awaited, never allowed to throw. */
@@ -291,7 +313,7 @@ export async function runAgent(opts: {
 
     try {
       for await (const message of query({
-        prompt: singleMessage(prompt, attachments),
+        prompt: singleMessage(prompt),
         options: {
           cwd: PROJECT_ROOT,
           model,
@@ -382,7 +404,7 @@ export async function runAgent(opts: {
       // Print the subprocess's own output too. Without this an exit code is all
       // that reaches the journal, and the cause is gone for good.
       if (stderrBuffer.trim()) {
-        console.error("[agent] CLI stderr tail:\n", redactSecrets(stderrBuffer).slice(-4000));
+        console.error("[agent] CLI stderr:\n", condenseStderr(redactSecrets(stderrBuffer)));
       } else if (isProcessExit(msg)) {
         console.error("[agent] CLI produced no stderr before exiting.");
       }

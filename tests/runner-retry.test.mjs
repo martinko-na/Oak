@@ -20,6 +20,8 @@ process.env.RUN_LOG_FILE = path.join(TMP_DIR, "agent-runs.jsonl");
  */
 let script = [];
 const calls = [];
+/** The user message each call received, and what was on disk at that moment. */
+const prompts = [];
 
 mock.module("@anthropic-ai/claude-agent-sdk", {
   namedExports: {
@@ -30,6 +32,19 @@ mock.module("@anthropic-ai/claude-agent-sdk", {
       // so the runner's capture of it is assertable.
       if (step.stderr) args.options.stderr?.(step.stderr);
       return (async function* () {
+        // Nothing else consumes the prompt stream, so reading it here captures
+        // exactly what the CLI would have been handed, while the run is live.
+        const { value } = await args.prompt[Symbol.asyncIterator]().next();
+        const content = value?.message?.content;
+        prompts.push({
+          content,
+          // Staged files must still exist while the query is running, or the
+          // agent's Read would find nothing.
+          stagedPresent:
+            typeof content === "string"
+              ? [...content.matchAll(/^- (\S+) \(/gm)].map((m) => fs.existsSync(m[1]))
+              : [],
+        });
         for (const message of step.messages ?? []) yield message;
         if (step.throws) throw step.throws;
       })();
@@ -45,6 +60,7 @@ const resultMessage = (text) => ({ type: "result", subtype: "success", result: t
 beforeEach(() => {
   script = [];
   calls.length = 0;
+  prompts.length = 0;
 });
 
 test("returns the text carried by the result message", async () => {
@@ -266,4 +282,120 @@ test("a text-only run records no attachments at all", async () => {
 
   const record = await waitForRecord("chat-no-attach");
   assert.equal(record.attachments, undefined);
+});
+
+// ─── Attachments reach the agent as staged files, not inline base64 ───────────
+//
+// A base64 image inlined into the prompt makes one very long stdin line, and the
+// CLI rejects lines in a particular size band with "Error parsing streaming input
+// line", killing the subprocess before a session opens. Measured on the
+// deployment: images of 108-150KB fail almost every time, smaller and much larger
+// ones pass. Staging to a file keeps the line short whatever the photo weighs, so
+// the size band stops mattering. See src/media/attachments.ts.
+
+/** A real-ish JPEG payload of roughly `kb` kilobytes, base64 encoded. */
+function jpegBase64(kb) {
+  const bytes = Buffer.alloc(kb * 1024, 0x41);
+  bytes.set([0xff, 0xd8, 0xff, 0xe0], 0); // JPEG SOI + APP0
+  return bytes.toString("base64");
+}
+
+test("an attached image is staged to a file and named in the prompt, never inlined", async () => {
+  script = [{ messages: [initMessage("sess-staged"), resultMessage("that is a solid lunch")] }];
+
+  await runAgent({
+    userMessage: "Lunch plus 0.5 liter of kofola",
+    chatId: "chat-staged",
+    // Inside the band that breaks the inline path.
+    attachments: [{ mediaType: "image/jpeg", data: jpegBase64(134) }],
+  });
+
+  const { content, stagedPresent } = prompts[0];
+  assert.equal(typeof content, "string", "the prompt is plain text, not content blocks");
+  assert.match(content, /Read each one with the Read tool/);
+  assert.match(content, /\.jpg \(image\/jpeg, 134KB\)/);
+  assert.deepEqual(stagedPresent, [true], "the staged file exists while the query runs");
+  // The whole point: no payload anywhere near the line handed to the CLI.
+  assert.doesNotMatch(content, /[A-Za-z0-9+/]{200,}/);
+  assert.ok(content.length < 4000, `prompt stayed short (was ${content.length} chars)`);
+});
+
+test("staged files are deleted once the run ends", async () => {
+  script = [{ messages: [initMessage("sess-clean"), resultMessage("ok")] }];
+
+  await runAgent({
+    userMessage: "dinner",
+    chatId: "chat-staged-clean",
+    attachments: [{ mediaType: "image/jpeg", data: jpegBase64(20) }],
+  });
+
+  const staged = [...prompts[0].content.matchAll(/^- (\S+) \(/gm)].map((m) => m[1]);
+  assert.equal(staged.length, 1);
+  assert.equal(fs.existsSync(staged[0]), false, "the staged file was cleaned up");
+});
+
+test("staged files survive a retry and are cleaned up after a failure", async () => {
+  script = [
+    { throws: new Error("Claude Code process exited with code 1") },
+    { messages: [initMessage("sess-retry-staged"), resultMessage("recovered")] },
+  ];
+
+  await runAgent({
+    userMessage: "breakfast",
+    chatId: "chat-staged-retry",
+    attachments: [{ mediaType: "image/jpeg", data: jpegBase64(30) }],
+  });
+
+  assert.equal(calls.length, 2);
+  // Both attempts must have seen the file: a retry that Reads a deleted path is
+  // worse than no retry at all.
+  assert.deepEqual(prompts[0].stagedPresent, [true]);
+  assert.deepEqual(prompts[1].stagedPresent, [true]);
+  const staged = [...prompts[1].content.matchAll(/^- (\S+) \(/gm)].map((m) => m[1]);
+  assert.equal(fs.existsSync(staged[0]), false);
+});
+
+test("a PDF is staged alongside an image, and an unsupported type is dropped", async () => {
+  script = [{ messages: [initMessage("sess-mixed"), resultMessage("ok")] }];
+
+  await runAgent({
+    userMessage: "label and photo",
+    chatId: "chat-staged-mixed",
+    attachments: [
+      { mediaType: "image/png", data: jpegBase64(10) },
+      { mediaType: "application/pdf", data: jpegBase64(10) },
+      { mediaType: "image/tiff", data: jpegBase64(10) },
+    ],
+  });
+
+  const { content } = prompts[0];
+  assert.match(content, /\.png \(image\/png/);
+  assert.match(content, /\.pdf \(application\/pdf/);
+  assert.doesNotMatch(content, /tiff/);
+  const record = await waitForRecord("chat-staged-mixed");
+  assert.deepEqual(
+    record.attachments.map((a) => a.mediaType),
+    ["image/png", "application/pdf"],
+  );
+});
+
+test("a text-only message adds no attachment instructions to the prompt", async () => {
+  script = [{ messages: [initMessage("sess-plain"), resultMessage("ok")] }];
+
+  await runAgent({ userMessage: "did 5x5 squats at 80kg", chatId: "chat-plain" });
+
+  assert.doesNotMatch(prompts[0].content, /Read each one/);
+});
+
+test("the stored stderr keeps the CLI message and elides the echoed payload", async () => {
+  // What the CLI actually does: its complaint first, then the whole rejected line.
+  const echoed = `Error parsing streaming input line: {"type":"user","data":"${"QUJD".repeat(5000)}"}`;
+  script = [{ stderr: echoed, throws: new Error("Claude Code process exited with code 1") }];
+
+  await assert.rejects(runAgent({ userMessage: "hi", chatId: "chat-elide" }), /code 1/);
+
+  const record = await waitForRecord("chat-elide");
+  assert.match(record.stderr, /^Error parsing streaming input line/);
+  assert.match(record.stderr, /chars of payload elided/);
+  assert.ok(record.stderr.length < 4100, `stderr stayed small (was ${record.stderr.length})`);
 });

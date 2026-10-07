@@ -33,6 +33,23 @@ const OUTCOME_CHARS = 200;
  */
 const STDERR_CHARS = 4000;
 
+/** A run of base64 long enough to be an echoed payload rather than real output. */
+const ECHOED_PAYLOAD = /[A-Za-z0-9+/=]{200,}/g;
+
+/**
+ * Make CLI stderr fit to store and to read. When the CLI rejects its input it
+ * echoes that input back, so an attachment turns a one-line error into hundreds of
+ * KB of base64 that buries the message and would flood the journal. The payload
+ * carries no information the record does not already hold (the attachment summary
+ * has the type and size), so replace each run with its length and keep the head,
+ * where the CLI's own message is.
+ */
+export function condenseStderr(text: string): string {
+  return text
+    .replace(ECHOED_PAYLOAD, (match) => `[${match.length} chars of payload elided]`)
+    .slice(0, STDERR_CHARS);
+}
+
 export type RunSource = "telegram" | "scheduled";
 
 export interface ModelUsageSummary {
@@ -65,7 +82,7 @@ export interface RunRecord {
   outcome?: string;
   /** What the message carried, so an attachment-shaped failure is recognisable. */
   attachments?: AttachmentSummary[];
-  /** Tail of the CLI subprocess's stderr. Only written on a failed run. */
+  /** Head of the CLI subprocess's stderr, payloads elided. Failed runs only. */
   stderr?: string;
 }
 
@@ -130,7 +147,7 @@ export async function appendRunRecord(record: RunRecord): Promise<void> {
       chatId: record.chatId ? redactSecrets(record.chatId) : undefined,
       userLabel: record.userLabel ? redactSecrets(record.userLabel) : undefined,
       outcome: outcomeSample(record.outcome),
-      stderr: record.stderr ? redactSecrets(record.stderr).slice(-STDERR_CHARS) : undefined,
+      stderr: record.stderr ? condenseStderr(redactSecrets(record.stderr)) : undefined,
     };
     const file = runLogFile();
     await fsp.mkdir(path.dirname(file), { recursive: true });

@@ -1,4 +1,5 @@
 import http from "node:http";
+import path from "node:path";
 import { Bot } from "grammy";
 import { pickPersonality } from "./agent/personalities.js";
 import { aggregateStats, readRunRecords } from "./agent/runlog.js";
@@ -10,7 +11,7 @@ import { registerBot, sendMessage, splitMessage } from "./channel/notify.js";
 import { isAllowed } from "./channel/permissions.js";
 import { registerTelegramWebhook, startWebhookServer } from "./channel/webhook-server.js";
 import { checkClaudeAuth, config } from "./config.js";
-import { type Attachment, isSupportedAttachment } from "./media/attachments.js";
+import { type Attachment, isSupportedAttachment, sweepStagedDir } from "./media/attachments.js";
 import { transcribeAudio, transcriptionAvailable, warmupTranscriber } from "./media/transcribe.js";
 import { notionConfigured } from "./notion/status.js";
 import { ouraConfigured } from "./oura/status.js";
@@ -191,7 +192,7 @@ function classifyError(msg: string, hadAttachment = false): string {
   // An attachment is work the user cannot cheaply repeat: they have to find the
   // photo again, and by then the meal is gone. Say what was lost and what to do.
   if (hadAttachment && lower.includes("process exited with code"))
-    return "I could not open that photo, the run died before it started. Send the image again and I will have another go.";
+    return "I could not open that photo. Tell me what was in it and I will work from that, or try sending it again.";
   if (lower.includes("usage limit") || lower.includes("credit balance is too low"))
     return "I have hit the Claude subscription usage limit. It resets on a rolling window, so try again shortly.";
   if (lower.includes("timeout") || lower.includes("timed out"))
@@ -398,6 +399,12 @@ setInterval(evictExpired, 15 * 60 * 1000);
   startSchedulerServer();
   await initScheduler();
   await bot.init();
+
+  // Staged attachments are deleted when their run ends, so anything still here
+  // outlived a crash or a hard restart. Nothing reads the directory afterwards,
+  // so without this sweep it only ever grows.
+  const sweptInbox = await sweepStagedDir(path.join(path.dirname(config.sessionFile), "inbox"));
+  if (sweptInbox > 0) console.log(`[index] Cleared ${sweptInbox} stale staged attachment(s)`);
 
   if (config.mode === "webhook") {
     // Scale-to-zero path: Telegram pushes updates to the HTTP server, and an
