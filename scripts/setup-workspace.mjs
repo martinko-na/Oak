@@ -8,7 +8,8 @@
  *   3. Body Stats DB
  *   4. Workout Log DB   (has a relation to Programs, so Programs must exist first)
  *   5. an initial Programs row (only if Programs is empty)
- *   6. Dashboard page    (3 rows of column layouts)
+ *   6. Recovery DB       (only with Oura enabled: one aggregate row per day)
+ *   7. Dashboard page    (3 rows of column layouts)
  *
  * Idempotent: existing databases/pages under the Hub are detected by title and
  * reused, never duplicated. All resolved ids (databases, hub, dashboard page,
@@ -22,6 +23,13 @@
  *   node scripts/setup-workspace.mjs                 # build/repair, keep existing dashboard content
  *   node scripts/setup-workspace.mjs --rebuild-dashboard
  *   node scripts/setup-workspace.mjs --hub <pageId>  # override NOTION_PARENT_PAGE_ID
+ *   node scripts/setup-workspace.mjs --with-oura     # force the Oura pieces on
+ *
+ * Oura pieces (Recovery DB, Workout Log Source/Calories/Distance/HR/zones/Oura ID, the
+ * Recovery Dashboard tile) are added when OURA_CLIENT_ID is set or --with-oura
+ * is passed. Missing Workout Log columns are added to an existing database in
+ * place; an existing Dashboard only gains the Recovery tile on
+ * --rebuild-dashboard.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -54,6 +62,7 @@ function pinnedHub() {
     return undefined;
   }
 }
+const WITH_OURA = flag("with-oura") || Boolean(process.env.OURA_CLIENT_ID);
 const HUB = opt("hub") ?? process.env.NOTION_PARENT_PAGE_ID ?? pinnedHub();
 if (!HUB) {
   console.error(
@@ -198,6 +207,15 @@ async function ensureDatabase(title, properties, existing) {
   return db.id;
 }
 
+/** Add any of `properties` the database does not have yet (never alters existing ones). */
+async function ensureProperties(dbId, title, properties) {
+  const have = (await api(`databases/${dbId}`)).properties ?? {};
+  const missing = Object.fromEntries(Object.entries(properties).filter(([k]) => !have[k]));
+  if (!Object.keys(missing).length) return;
+  await api(`databases/${dbId}`, "PATCH", { properties: missing });
+  console.log(`+ added ${Object.keys(missing).join(", ")} to ${title}`);
+}
+
 const sel = (...names) => ({ select: { options: names.map((name) => ({ name })) } });
 const multi = (...names) => ({ multi_select: { options: names.map((name) => ({ name })) } });
 
@@ -285,6 +303,42 @@ async function main() {
     existing,
   );
 
+  if (WITH_OURA) {
+    // Oura enrichment columns; added in place to a Workout Log that predates Oura.
+    await ensureProperties(cache["Workout Log"], "Workout Log", {
+      Source: sel("Manual", "Oura"),
+      Calories: { number: {} },
+      "Distance (km)": { number: {} },
+      "Oura ID": { rich_text: {} },
+      "Avg HR (bpm)": { number: {} },
+      "Max HR (bpm)": { number: {} },
+      "HR Zones": { rich_text: {} },
+      "Z2 (min)": { number: {} },
+      "Z4-5 (min)": { number: {} },
+    });
+
+    // Recovery: one aggregate row per day from scripts/oura.mjs (no raw data).
+    cache.Recovery = await ensureDatabase(
+      "Recovery",
+      {
+        Day: { title: {} },
+        Date: { date: {} },
+        Readiness: { number: {} },
+        "Sleep Score": { number: {} },
+        "Total Sleep (h)": { number: {} },
+        "Avg HRV (ms)": { number: {} },
+        "Lowest HR (bpm)": { number: {} },
+        "Temp Dev (°C)": { number: {} },
+        "Activity Score": { number: {} },
+        Steps: { number: {} },
+        // Labels match FLAG_LABELS in scripts/oura.mjs.
+        Flags: multi("Temp elevated", "Low readiness", "Low HRV", "Short sleep x2"),
+        "Coach Takeaway": { rich_text: {} },
+      },
+      existing,
+    );
+  }
+
   // 5. Initial program row, only if Programs is empty.
   const progRows = await api(`databases/${programs}/query`, "POST", { page_size: 1 });
   if (!progRows.results?.length) {
@@ -346,6 +400,7 @@ async function buildDashboardBody(pageId) {
     sep(),
     link("Workout Log", cache["Workout Log"]),
   ];
+  if (cache.Recovery) indexLinks.push(sep(), link("Recovery", cache.Recovery));
   if (cache.__knowledgeBase) indexLinks.push(sep(), link("Knowledge Base", cache.__knowledgeBase));
 
   await append(pageId, [
@@ -356,16 +411,17 @@ async function buildDashboardBody(pageId) {
     },
     div(),
   ]);
-  // Row 1: This Week | Goals | Body Stats
-  await append(pageId, [
-    colList(
-      // Tile header colors are canonical; keep in sync with TILE_COLORS in notion.mjs.
-      [box("This Week", "📅", "gray_background"), bul("Log a session to populate this tile.")],
-      [box("Goals", "🎯", "brown_background"), bul("Add a goal to populate this tile.")],
-      [box("Body Stats", "⚖️", "red_background"), bul("Log a check-in to populate this tile.")],
-    ),
-    div(),
-  ]);
+  // Row 1: This Week | Goals | Body Stats (| Recovery, with Oura)
+  // Tile header colors are canonical; keep in sync with TILE_COLORS in notion.mjs.
+  const row1 = [
+    [box("This Week", "📅", "gray_background"), bul("Log a session to populate this tile.")],
+    [box("Goals", "🎯", "brown_background"), bul("Add a goal to populate this tile.")],
+    [box("Body Stats", "⚖️", "red_background"), bul("Log a check-in to populate this tile.")],
+  ];
+  if (cache.Recovery) {
+    row1.push([box("Recovery", "🔋", "purple_background"), bul("Oura data lands here daily.")]);
+  }
+  await append(pageId, [colList(...row1), div()]);
   // Row 2: Next Session | Active Program + Coach Note
   await append(pageId, [
     colList(
@@ -415,7 +471,7 @@ async function ensureKnowledgeBase() {
 /** Capture every Dashboard tile column id, row by row, keyed by tile name.
  *  Row order matches buildDashboardBody; keep TILE_ROWS in notion.mjs in sync. */
 const TILE_ROWS = [
-  ["thisWeek", "goals", "bodyStats"],
+  ["thisWeek", "goals", "bodyStats", "recovery"],
   ["nextSession", "activeProgram"],
   ["nutrition", "quickCommands"],
 ];

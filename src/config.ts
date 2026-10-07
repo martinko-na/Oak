@@ -28,6 +28,15 @@ export const config = {
   googleTokenFile: process.env.GOOGLE_TOKEN_FILE ?? "./data/google-token.json",
   googleCalendarId: process.env.GOOGLE_CALENDAR_ID ?? "",
 
+  // Oura. Optional: when absent, recovery features are disabled. The OAuth
+  // client comes from cloud.ouraring.com; tokens are minted once by
+  // `scripts/oura-auth.mjs` into data/oura-token.json. Oura rotates the refresh
+  // token on every refresh, so that file must persist between runs.
+  ouraClientId: process.env.OURA_CLIENT_ID ?? "",
+  ouraClientSecret: process.env.OURA_CLIENT_SECRET ?? "",
+  ouraRefreshToken: process.env.OURA_REFRESH_TOKEN ?? "",
+  ouraTokenFile: process.env.OURA_TOKEN_FILE ?? "./data/oura-token.json",
+
   // Claude subscription auth. The agent always runs on the subscription token
   // from `claude setup-token` (sk-ant-oat01-...), never a metered API key. The
   // SDK reads it from the environment; we surface it here to validate at startup.

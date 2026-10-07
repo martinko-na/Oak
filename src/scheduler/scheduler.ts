@@ -12,12 +12,21 @@ import { writeJsonAtomic } from "../util/atomicfile.js";
  * When a task fires, it runs the agent with the task's prompt and pushes the result
  * to the task's chat. Because the agent shares the chat's session, the reminder lands
  * in context with the ongoing conversation.
+ *
+ * A task with `runAt` (ISO datetime) instead of a cron expression is a one-shot: it
+ * fires once and is then removed. The Oura sync retries (+10 min, +1 h) use these.
+ * One-shots survive a restart: a past-due one fires on load unless it is more than
+ * ONE_SHOT_STALE_MS late, in which case it is dropped (a retry for a morning that
+ * has long passed is noise, not help).
  */
 
 export interface ScheduledTask {
   id: string;
   name: string;
+  /** Standard 5-field cron. Empty for one-shot tasks. */
   cron: string;
+  /** One-shot fire time (ISO 8601). When set, `cron` is ignored. */
+  runAt?: string;
   prompt: string;
   chatId: string;
   enabled: boolean;
@@ -26,6 +35,23 @@ export interface ScheduledTask {
 
 const tasks = new Map<string, { task: ScheduledTask; job: Cron }>();
 const SCHEDULE_FILE = config.scheduleFile;
+export const ONE_SHOT_STALE_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * What to do with a one-shot task at `now`: schedule it for later, fire it right
+ * away (past-due but recent, e.g. after a restart), or drop it (stale or invalid).
+ * Returns null for recurring (cron) tasks.
+ */
+export function oneShotDisposition(
+  task: ScheduledTask,
+  now: number = Date.now(),
+): "schedule" | "fire" | "drop" | null {
+  if (!task.runAt) return null;
+  const at = Date.parse(task.runAt);
+  if (Number.isNaN(at)) return "drop";
+  if (at > now) return "schedule";
+  return now - at > ONE_SHOT_STALE_MS ? "drop" : "fire";
+}
 
 /**
  * Default reminders seeded the first time the agent runs with no schedule file.
@@ -40,11 +66,26 @@ function defaultTasks(): ScheduledTask[] {
       name: "Morning session nudge",
       cron: "0 8 * * *",
       prompt:
-        "Good morning. Tell me what today's training session should be based on my goals, my weekly plan, and what I have logged recently. Keep it short and motivating.",
+        "Good morning. If Oura is configured, run the recovery-check skill in morning mode first (it handles data that has not synced yet). Then tell me what today's training session should be based on my goals, my weekly plan, what I have logged recently, and last night's recovery. Keep it short and motivating.",
       chatId: config.ownerChatId,
       enabled: true,
       modelTier: "standard",
     },
+    // Only seeded when Oura is set up: without it there is nothing to recap.
+    ...(config.ouraClientId
+      ? [
+          {
+            id: "lunch-recovery",
+            name: "Lunch recovery recap",
+            cron: "30 12 * * *",
+            prompt:
+              "Lunch check-in. Run the recovery-check skill in lunch mode: recap yesterday from Oura (recovery, activity, workouts), say how this morning's session lined up with today's readiness, give me a nutrition and hydration nudge for the rest of today, and a heads-up for tomorrow. Save yesterday's Recovery row and sync Oura workouts to Notion. Keep it short.",
+            chatId: config.ownerChatId,
+            enabled: true,
+            modelTier: "standard" as ModelTier,
+          },
+        ]
+      : []),
     {
       id: "weekly-plan",
       name: "Sunday weekly plan",
@@ -119,7 +160,7 @@ export function addTask(task: ScheduledTask): void {
   // Only start a live croner job in polling mode; webhook mode is fired externally.
   if (config.mode === "polling") startTask(task);
   persist();
-  console.log(`[scheduler] Added task: ${task.name} (${task.cron})`);
+  console.log(`[scheduler] Added task: ${task.name} (${task.runAt ?? task.cron})`);
 }
 
 export function removeTask(taskId: string): boolean {
@@ -141,8 +182,36 @@ export function listTasks(): ScheduledTask[] {
 }
 
 function startTask(task: ScheduledTask): void {
-  const job = new Cron(task.cron, { timezone: config.timezone }, () => executeTask(task));
-  tasks.set(task.id, { task, job });
+  switch (oneShotDisposition(task)) {
+    case null: {
+      const job = new Cron(task.cron, { timezone: config.timezone }, () => executeTask(task));
+      tasks.set(task.id, { task, job });
+      return;
+    }
+    case "schedule": {
+      const job = new Cron(new Date(task.runAt as string), () => runOneShot(task));
+      tasks.set(task.id, { task, job });
+      return;
+    }
+    case "fire":
+      setImmediate(() => void runOneShot(task));
+      return;
+    case "drop":
+      console.log(`[scheduler] Dropping stale one-shot: ${task.name} (${task.runAt})`);
+      removeTask(task.id);
+      return;
+  }
+}
+
+/**
+ * Fire a one-shot. It is removed before running, so a crash or restart mid-run
+ * cannot fire it twice, and so the agent sees an accurate task list while it runs
+ * (e.g. when it cancels the remaining Oura retry).
+ */
+async function runOneShot(task: ScheduledTask): Promise<void> {
+  if (!definitions.some((t) => t.id === task.id)) return; // cancelled meanwhile
+  removeTask(task.id);
+  await executeTask(task);
 }
 
 function persist(): void {

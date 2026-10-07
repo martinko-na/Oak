@@ -19,6 +19,7 @@ name.
 | `find-exercises` | Looks up real exercises (see below). |
 | `notion-formatting` | How to write clean, structured Notion pages and keep the Dashboard in sync. |
 | `import-knowledge` | Imports dumped training programs into the Notion Knowledge Base (see below). |
+| `recovery-check` | Oura: morning readiness check that can adjust today's session, lunch recap of yesterday (recovery, activity, workouts, a nutrition nudge), and the "synced" reply when data was late (see below). |
 
 Cross-cutting coaching rules (disambiguate Notion pages by parent context, read
 the day from the Telegram header, never use em dashes, etc.) are baked into these
@@ -86,6 +87,20 @@ durable, organised copy lives in Notion, and the coach draws on it when planning
 Persona overlays change the coach's voice without touching its knowledge or safety
 rules. The owner gets Arnold; other chats get a stable random famous character.
 See [customization.md](./customization.md) to configure or extend them.
+
+## Oura recovery
+
+With Oura connected (`scripts/oura.mjs`), the coach reads last night's
+readiness, sleep and HRV against your 7-night baseline, plus yesterday's
+activity and auto-detected workouts (with average and peak heart rate and minutes
+in each of 5 heart-rate zones, using a measured max HR from `PERSONAL.md` or an
+estimate from your age). Red flags are computed in code, not by the
+model: temperature +0.5°C or more (rest or mobility), readiness under 60 or HRV
+more than 20% below baseline (deload or Zone 2), and two nights under 6h in a row
+(cap intensity). Each day is saved as one aggregate row in the Notion Recovery
+database. Oura workouts add their numbers to the session you logged, and create a
+row only for cardio you didn't log; strength sessions are never auto-logged.
+Raw Oura data is never stored. See [configuration.md](./configuration.md#oura-optional).
 
 ## Reminders
 

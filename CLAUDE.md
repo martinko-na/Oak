@@ -19,7 +19,7 @@ If a file named `PERSONAL.md` exists in the project root, read it at the start o
 
 ## Your Toolkit
 
-You have built-in tools (Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch) and a coaching plugin of skills. Notion is reached through its REST API, driven by the bundled `scripts/notion.mjs` and `scripts/setup-workspace.mjs` helpers (run via Bash). There is no Notion MCP server: the REST API does everything (rich blocks, tables, columns, database rows, page icons), so it is the single path for all Notion reads and writes. Google Calendar follows the same pattern: the bundled `scripts/calendar.mjs` helper wraps its REST API for all calendar reads and writes (see the calendar-sync skill and `docs/google-calendar-architecture.md`).
+You have built-in tools (Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch) and a coaching plugin of skills. Notion is reached through its REST API, driven by the bundled `scripts/notion.mjs` and `scripts/setup-workspace.mjs` helpers (run via Bash). There is no Notion MCP server: the REST API does everything (rich blocks, tables, columns, database rows, page icons), so it is the single path for all Notion reads and writes. Google Calendar follows the same pattern: the bundled `scripts/calendar.mjs` helper wraps its REST API for all calendar reads and writes (see the calendar-sync skill and `docs/google-calendar-architecture.md`). Oura does too: `scripts/oura.mjs` reads recovery data (see the recovery-check skill).
 
 ### Skills (invoked automatically when relevant)
 
@@ -31,6 +31,7 @@ You have built-in tools (Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearc
 | find-exercises | Look up real exercises by muscle, equipment, or level from a free database (alternatives, substitutes for an injury, instructions, demo image) |
 | weekly-plan | Build or refresh the training plan for the week and save it to Notion |
 | calendar-sync | Check Google Calendar availability before planning; create, move, or cancel calendar events for training sessions (with phone reminders) |
+| recovery-check | Oura: morning readiness check, lunch recovery recap, the user saying they synced their ring, or questions about sleep and recovery |
 | nutrition-advice | Food, macros, meals, and eating questions tied to their goals |
 | progress-report | Summarise trends, consistency, and personal records from the log |
 | notion-formatting | Read before writing any prose content to Notion, so pages are clean, structured, and scannable |
@@ -49,6 +50,16 @@ curl -s -X POST http://localhost:9130/tasks -d '{
   "name": "Evening training reminder",
   "cron": "0 18 * * 1-5",
   "prompt": "Remind me to train and tell me what today's session is.",
+  "chatId": "<the current chat id from the message header>"
+}'
+
+# One-shot reminder: fires once, then deletes itself. Use inMinutes (the host
+# computes the time) rather than working out a timestamp yourself.
+curl -s -X POST http://localhost:9130/tasks -d '{
+  "id": "stretch-later",
+  "name": "Stretch reminder",
+  "inMinutes": 90,
+  "prompt": "Remind me to do my 10 minute stretch.",
   "chatId": "<the current chat id from the message header>"
 }'
 
@@ -95,6 +106,14 @@ The Dashboard page is a live snapshot and summary of what is happening: current 
 - The prose tiles (Next Session, Active Program, Nutrition) are yours to maintain with the same care a person would give their own board. Update them when the conversation gives you the material, without being asked: recommended or planned a session, refresh Next Session; agreed macros or nutrition targets, refresh Nutrition; program or focus shifted, refresh Active Program. Likewise, if you happen to read the Dashboard and a tile is visibly stale against what you know (Next Session shows a workout that was already logged, the hero shows last week), fix it in the same turn.
 
 For one-off or prose tiles use `scripts/notion.mjs refresh-tile --tile <name>` with tile ids resolved from `data/notion-ids.json` (`__dashboard.columns`); for the three data tiles prefer `sync-dashboard`. Never edit blocks in place; replace the whole tile (both commands do). The notion-formatting skill has the commands and the recommended tile content. If no Dashboard exists yet, run setup-notion. Do not announce the Dashboard update to the user unless they ask; just keep it accurate.
+
+## Recovery data (Oura)
+
+If Oura is configured, the morning nudge checks last night's readiness and the 12:30 lunch task recaps yesterday (recovery-check skill). Rules:
+
+- Oura numbers come only from `scripts/oura.mjs` output or the Notion Recovery database. Never estimate, round up, or fill in a missing value. Data that isn't there yet is "not synced", not "bad".
+- The `flags` the helper returns (elevated temperature, low readiness or HRV, two short nights) override the planned session: explain the change in one line and let the user overrule it consciously. Elevated temperature falls under Safety: suggest rest, never diagnose.
+- Only the daily aggregate is stored: one Recovery row per day plus the Oura fields on Workout Log rows. Never write raw Oura data to Notion or files.
 
 ## Workflow
 

@@ -12,6 +12,7 @@ const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "oak-scheduler-"));
 let scheduleFile = path.join(TMP_DIR, "schedule.json");
 let mode = "webhook";
 let ownerChatId = "";
+let ouraClientId = "";
 
 mock.module("../dist/config.js", {
   namedExports: {
@@ -25,6 +26,9 @@ mock.module("../dist/config.js", {
       },
       get ownerChatId() {
         return ownerChatId;
+      },
+      get ouraClientId() {
+        return ouraClientId;
       },
     },
   },
@@ -56,6 +60,7 @@ async function loadScheduler(opts = {}) {
   scheduleFile = path.join(TMP_DIR, `schedule-${++instance}.json`);
   mode = opts.mode ?? "webhook";
   ownerChatId = opts.ownerChatId ?? "";
+  ouraClientId = opts.ouraClientId ?? "";
   if (opts.seed) fs.writeFileSync(scheduleFile, JSON.stringify(opts.seed));
   agentCalls.length = 0;
   sent.length = 0;
@@ -169,4 +174,89 @@ test("a corrupt schedule file falls back to the defaults instead of throwing", a
   await scheduler.initScheduler();
 
   assert.equal(scheduler.listTasks().length, 2);
+});
+
+// ─── Oura defaults and one-shot tasks ─────────────────────────────────────────
+
+const waitFor = async (pred, ms = 3000) => {
+  const start = Date.now();
+  while (!pred()) {
+    if (Date.now() - start > ms) throw new Error("timed out waiting");
+    await new Promise((r) => setTimeout(r, 25));
+  }
+};
+
+const oneShot = (over = {}) =>
+  task({ id: "oura-retry", name: "Oura sync retry", cron: "", prompt: "Retry Oura.", ...over });
+
+test("seeds the lunch recovery recap only when Oura is configured", async () => {
+  const scheduler = await loadScheduler({ ownerChatId: "99", ouraClientId: "oura" });
+
+  await scheduler.initScheduler();
+
+  const ids = scheduler.listTasks().map((t) => t.id);
+  assert.deepEqual(ids, ["morning-nudge", "lunch-recovery", "weekly-plan"]);
+  assert.equal(scheduler.getTask("lunch-recovery").cron, "30 12 * * *");
+});
+
+test("oneShotDisposition: future schedules, recent past fires, stale or invalid drops", async () => {
+  const scheduler = await loadScheduler();
+  const now = Date.parse("2026-10-07T08:00:00Z");
+  const at = (iso) => oneShot({ runAt: iso });
+
+  assert.equal(scheduler.oneShotDisposition(task(), now), null);
+  assert.equal(scheduler.oneShotDisposition(at("2026-10-07T08:10:00Z"), now), "schedule");
+  assert.equal(scheduler.oneShotDisposition(at("2026-10-07T07:30:00Z"), now), "fire");
+  assert.equal(scheduler.oneShotDisposition(at("2026-10-07T05:30:00Z"), now), "drop");
+  assert.equal(scheduler.oneShotDisposition(at("not a date"), now), "drop");
+});
+
+test("a one-shot fires once in polling mode and removes itself", async () => {
+  const scheduler = await loadScheduler({ mode: "polling" });
+  await scheduler.initScheduler();
+
+  scheduler.addTask(oneShot({ runAt: new Date(Date.now() + 1100).toISOString() }));
+  assert.equal(scheduler.listTasks().length, 1);
+
+  await waitFor(() => sent.length === 1);
+  assert.equal(agentCalls[0].userMessage, "Retry Oura.");
+  assert.deepEqual(scheduler.listTasks(), []);
+  assert.deepEqual(JSON.parse(fs.readFileSync(scheduleFile, "utf-8")), []);
+});
+
+test("a cancelled one-shot never fires", async () => {
+  const scheduler = await loadScheduler({ mode: "polling" });
+  await scheduler.initScheduler();
+
+  scheduler.addTask(oneShot({ runAt: new Date(Date.now() + 1100).toISOString() }));
+  assert.equal(scheduler.removeTask("oura-retry"), true);
+
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.equal(agentCalls.length, 0);
+});
+
+test("after a restart, a recently missed one-shot fires and a stale one is dropped", async () => {
+  const recent = oneShot({ id: "recent", runAt: new Date(Date.now() - 5 * 60_000).toISOString() });
+  const stale = oneShot({
+    id: "stale",
+    prompt: "Too late.",
+    runAt: new Date(Date.now() - 3 * 60 * 60_000).toISOString(),
+  });
+  const scheduler = await loadScheduler({
+    mode: "polling",
+    seed: [task({ cron: "0 4 * * *" }), recent, stale],
+  });
+
+  await scheduler.initScheduler();
+  await waitFor(() => sent.length === 1);
+
+  assert.deepEqual(
+    agentCalls.map((c) => c.userMessage),
+    ["Retry Oura."],
+  );
+  assert.deepEqual(
+    scheduler.listTasks().map((t) => t.id),
+    ["morning"],
+  );
+  scheduler.removeTask("morning"); // stop the live cron job so the test exits
 });
