@@ -13,6 +13,7 @@ import { checkClaudeAuth, config } from "./config.js";
 import { type Attachment, isSupportedAttachment } from "./media/attachments.js";
 import { transcribeAudio, transcriptionAvailable, warmupTranscriber } from "./media/transcribe.js";
 import { notionConfigured } from "./notion/status.js";
+import { ouraConfigured } from "./oura/status.js";
 import { initScheduler } from "./scheduler/scheduler.js";
 import { startSchedulerServer } from "./scheduler/server.js";
 import { redactSecrets } from "./util/redact.js";
@@ -393,7 +394,8 @@ setInterval(evictExpired, 15 * 60 * 1000);
     botRunning = true;
     console.log(
       `${config.agentName} is running (webhook mode). Notion ${notionConfigured() ? "enabled" : "disabled"}, ` +
-        `Google Calendar ${googleCalendarConfigured() ? "enabled" : "disabled"}.`,
+        `Google Calendar ${googleCalendarConfigured() ? "enabled" : "disabled"}, ` +
+        `Oura ${ouraConfigured() ? "enabled" : "disabled"}.`,
     );
     // No online ping here: in scale-to-zero the instance may start cold for any
     // request, so a startup message would fire on every cold start.
@@ -405,7 +407,8 @@ setInterval(evictExpired, 15 * 60 * 1000);
   warmupTranscriber();
   console.log(
     `${config.agentName} is running (polling mode). Notion ${notionConfigured() ? "enabled" : "disabled"}, ` +
-      `Google Calendar ${googleCalendarConfigured() ? "enabled" : "disabled"}.`,
+      `Google Calendar ${googleCalendarConfigured() ? "enabled" : "disabled"}, ` +
+      `Oura ${ouraConfigured() ? "enabled" : "disabled"}.`,
   );
   if (config.ownerChatId) {
     const ownerPersona = pickPersonality(config.ownerChatId);

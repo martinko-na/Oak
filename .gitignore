@@ -41,3 +41,6 @@ crash.log
 # Azure deployment parameters (hold secrets)
 infra/azure/main.parameters.json
 __pycache__/
+
+# Salesforce CLI local state (created by sf tooling run in this folder)
+.sf/

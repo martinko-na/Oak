@@ -42,6 +42,37 @@ After setting the client id and secret, authorise once with
 `node --env-file=.env scripts/google-auth.mjs`. See
 [google-calendar-architecture.md](./google-calendar-architecture.md).
 
+## Oura (optional)
+
+Reads last night's readiness and sleep, yesterday's activity, and auto-detected
+workouts, so the morning nudge can adjust today's session and a 12:30 lunch recap
+can review yesterday. Scopes: `daily`, `workout`, `heartrate` (average and peak
+HR plus minutes in 5 heart-rate zones per workout; the samples themselves are
+never stored), and `personal` (only the age is read, to estimate max HR as
+208 - 0.7 x age when `PERSONAL.md` has no measured max HR). Only aggregates are stored: one Notion Recovery row per day and the
+Oura fields on Workout Log rows. Requires an active Oura membership.
+
+| Variable | What it is |
+|---|---|
+| `OURA_CLIENT_ID` / `OURA_CLIENT_SECRET` | OAuth credentials of an API application created at [cloud.ouraring.com/oauth/applications](https://cloud.ouraring.com/oauth/applications), with redirect URI `http://localhost:8765/callback`. Blank disables Oura; the bot still runs. Oura retired personal access tokens in December 2025, so OAuth is the only option. |
+| `OURA_REDIRECT_PORT` | Optional. Port for the one-time authorisation redirect, default `8765`. Must match the redirect URI registered with Oura. |
+| `OURA_TOKEN_FILE` | Optional. Token store, default `./data/oura-token.json`. Oura rotates the refresh token on every refresh, so this file must persist between runs (local disk, or a mounted volume on hosted deployments). |
+| `OURA_REFRESH_TOKEN` | Optional bootstrap seed used only when the token file is empty. It is spent on first use, so it cannot replace a persistent token file. |
+| `OURA_SANDBOX` | Optional. `true` reads Oura's sandbox (synthetic data) instead of your account, for trying the flow end to end. |
+
+After setting the client id and secret, authorise once with
+`node --env-file=.env scripts/oura-auth.mjs`, check it with
+`node --env-file=.env scripts/oura.mjs status`, then run
+`node scripts/setup-workspace.mjs` to add the Recovery database and the Oura
+columns on the Workout Log (add `--rebuild-dashboard` to get the Recovery tile
+on an existing Dashboard).
+
+If last night's data hasn't synced from the phone by the 08:00 check, the coach
+gives the planned session, asks you to open the Oura app and reply "synced", and
+re-checks automatically after 10 minutes and after 1 hour (one-shot tasks, polling
+mode only). Each check is logged in `data/oura-sync-log.json` so you can see how
+long the sync usually takes and move the morning check if needed.
+
 ## Agent identity and behaviour
 
 | Variable | Default | What it is |
@@ -96,7 +127,12 @@ See [deployment.md](./deployment.md) for how the two modes map to hosts.
 ## Reminders
 
 Two reminders are seeded by default: a morning session nudge (08:00) and the
-Sunday weekly plan (18:00), in `TIMEZONE`. Ask the coach in chat to add, change,
+Sunday weekly plan (18:00), in `TIMEZONE`. With Oura configured, a lunch
+recovery recap (12:30) is seeded too. Seeding only happens when there is no
+schedule file yet; on an existing install add it by asking the coach, or with
+`curl -s -X POST localhost:9130/tasks -d '{"id":"lunch-recovery","name":"Lunch recovery recap","cron":"30 12 * * *","chatId":"<your chat id>","prompt":"Lunch check-in. Run the recovery-check skill in lunch mode."}'`.
+Tasks can also be one-shots (`inMinutes` or `runAt` instead of `cron`): they
+fire once and delete themselves. Ask the coach in chat to add, change,
 or remove reminders ("remind me to train at 6pm on weekdays") and it manages them
 live in polling mode. In webhook mode the agent records the request but an
 external scheduler must run the job (see [deployment.md](./deployment.md)).

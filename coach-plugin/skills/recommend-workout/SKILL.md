@@ -25,12 +25,13 @@ On the first message of a new conversation, check that `PERSONAL.md` has real go
   ```
 
   Use the returned loads and RPE as the reference point for today's prescription. The helper is one call and already sorted by date. Check the current week's plan if one exists.
+- If Oura is configured, check last night's recovery with `node scripts/oura.mjs day --date <today>` (recovery-check skill). Any `flags` in the result override the plan (deload, cap intensity, or rest) as that skill describes. If the data hasn't synced yet, recommend the session as planned and mention they can sync and reply "synced" for an adjustment.
 
 ## 2. Decide the session
 
 Apply basic training sense:
 
-- Respect recovery: do not recommend heavy work on a muscle group trained hard yesterday. Rotate focus sensibly.
+- Respect recovery: do not recommend heavy work on a muscle group trained hard yesterday. Rotate focus sensibly. When Oura data is available, let readiness set the intensity: push on a green day, back off on a flagged one.
 - Move toward the user's priority goal (progressive overload on the key lifts, or the conditioning the goal needs).
 - Fit the time and equipment they actually have. If they say they are short on time, give a tight, high-value version.
 - Work around any injury or limitation in `PERSONAL.md`.

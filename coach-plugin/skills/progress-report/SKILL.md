@@ -11,6 +11,7 @@ Turn the Notion Workout Log into an honest, motivating read on how the user is d
 
 - Decide the window from the request (this week, last month, or a sensible default like the last 4 weeks).
 - Query the Notion Workout Log with `node scripts/notion.mjs query-recent --db "Workout Log"` for sessions in that window. Read current Goals and `PERSONAL.md` for what success looks like.
+- If Oura is configured, pull recovery for the same window with `node scripts/oura.mjs trend --end <today> --days <N>` (live from Oura) and read the takeaways in the Notion Recovery database.
 
 ## 2. Analyse
 
@@ -18,6 +19,7 @@ Turn the Notion Workout Log into an honest, motivating read on how the user is d
 - Volume and load trends on the key lifts (are the numbers moving up?).
 - Personal records: any best loads, reps, distances, or times in the window.
 - Balance and recovery: any neglected focus areas, or signs of doing too much.
+- Recovery trend (with Oura): average readiness, sleep and HRV across the window, flagged days, and whether hard sessions landed on good or poor recovery days. Name one clear link if the data shows it (for example, sessions after short nights had lower top sets).
 - Progress toward each active goal.
 
 Be truthful. If consistency slipped or a lift stalled, say so kindly and give a concrete fix. Do not invent numbers: if the log is thin, say what is missing and encourage logging.

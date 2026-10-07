@@ -34,6 +34,9 @@ on top of a plan you already have.
 - Proactive reminders (morning nudge, Sunday plan, plus any custom reminder you ask for), and
   optionally put planned sessions on your **Google Calendar** with native phone reminders. See
   [docs/google-calendar-architecture.md](./docs/google-calendar-architecture.md).
+- Optional **Oura** integration: the morning nudge adapts to last night's readiness, sleep and
+  HRV, and a lunch recap reviews yesterday's recovery and activity, with one aggregate row
+  per day saved to Notion.
 
 **Notion is the agent's knowledge base.** The agent creates the Notion databases for you
 (Programs, Goals, Body Stats, Workout Log) plus a Dashboard and Knowledge Base page, fills them
@@ -69,7 +72,7 @@ Before you start, make sure you have:
 - **Optional: a Google account** if you want planned sessions on your calendar with
   native phone reminders (one-time OAuth setup, quickstart step 6).
 
-No fitness tracker, no third-party services, no database to run: state lives in Notion
+No fitness tracker required (Oura is optional), no third-party services, no database to run: state lives in Notion
 and in a small gitignored `data/` folder.
 
 ## How it works
@@ -128,7 +131,14 @@ while the running agent is personalised to you. More in [docs/architecture.md](.
    once with `node --env-file=.env scripts/google-auth.mjs`. Skip this and calendar sync just
    stays off. See [docs/google-calendar-architecture.md](./docs/google-calendar-architecture.md).
 
-7. **Run it.**
+7. **(Optional) Connect Oura.** Lets the coach adjust your session to last night's readiness
+   and recap yesterday at lunch. Create an API application at
+   [cloud.ouraring.com](https://cloud.ouraring.com/oauth/applications) with redirect URI
+   `http://localhost:8765/callback`, put its client id/secret in `.env` as `OURA_CLIENT_ID` /
+   `OURA_CLIENT_SECRET`, then authorise once with `node --env-file=.env scripts/oura-auth.mjs`.
+   Needs an active Oura membership. See [docs/configuration.md](./docs/configuration.md#oura-optional).
+
+8. **Run it.**
    ```bash
    npm run dev          # live development, loads .env automatically
    # or always-on in Docker:

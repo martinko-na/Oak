@@ -19,8 +19,9 @@ Relations force the order: a database referenced by a relation must exist first.
 3. **Body Stats**
 4. **Workout Log** (has a `Program` relation to Programs)
 5. an initial Programs row (only if Programs is empty)
-6. **Dashboard** page
-7. **Knowledge Base** page (where dumped training programs are filed as subpages)
+6. **Recovery** (only when Oura is enabled: `OURA_CLIENT_ID` set, or `--with-oura`)
+7. **Dashboard** page
+8. **Knowledge Base** page (where dumped training programs are filed as subpages)
 
 Run it with: `node scripts/setup-workspace.mjs` (idempotent: existing
 databases/pages are detected by title and reused, never duplicated). Add
@@ -66,19 +67,32 @@ Morning fasted, Evening, After holiday, Post-training), Notes (rich_text).
 Legs, Chest, Back, Shoulders, Biceps, Triceps, Cardio, Full Body, Mobility),
 Status (select: Completed, Partial, Skipped), Top Set (number), Volume (kg)
 (number), Duration (min) (number), RPE (1-10) (number), Program (relation to
-Programs, single_property).
+Programs, single_property). With Oura enabled, also: Source (select: Manual,
+Oura), Calories (number), Distance (km) (number), Avg HR (bpm) (number), Max HR
+(bpm) (number), HR Zones (rich_text, e.g. "Z1 5 · Z2 22 · Z3 10 · Z4 3 · Z5 0"),
+Z2 (min) (number), Z4-5 (min) (number), Oura ID (rich_text). These are
+added in place to an existing Workout Log.
+
+**Recovery** (Oura only, one row per day, upserted by Date): Day (title), Date
+(date), Readiness, Sleep Score, Total Sleep (h), Avg HRV (ms), Lowest HR (bpm),
+Temp Dev (°C), Activity Score, Steps (numbers), Flags (multi_select: Temp
+elevated, Low readiness, Low HRV, Short sleep x2), Coach Takeaway (rich_text).
+Written only by `oura.mjs day | notion.mjs upsert-recovery`, so values are
+exactly Oura's. Workout Log enrichment goes through
+`oura.mjs workouts | notion.mjs sync-oura-workouts`.
 
 ## Dashboard
 
 A page (not a database), three rows of column layouts:
 
 - Hero: full-width callout (program, week, start date)
-- Row 1: 3 columns (This Week, Goals, Body Stats)
+- Row 1: 3 columns (This Week, Goals, Body Stats), plus Recovery with Oura
 - Row 2: 2 columns (Next Session, Active Program + Coach Note)
 - Row 3: 2 columns (Nutrition, Quick Commands)
 
 The Row 1 column ids are captured into `data/notion-ids.json` under
-`__dashboard.columns` (`thisWeek`, `goals`, `bodyStats`).
+`__dashboard.columns` (`thisWeek`, `goals`, `bodyStats`, and `recovery` with
+Oura). `sync-dashboard` refreshes the Recovery tile from the latest Recovery row.
 
 ### Updating tiles
 

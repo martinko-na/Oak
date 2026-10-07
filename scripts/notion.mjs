@@ -33,6 +33,9 @@
  *   node scripts/notion.mjs append --page <pageId> --md "# Heading\n> [!note] callout\n---\n- a\n- b"
  *   node scripts/notion.mjs append --page <pageId> --file plan.md
  *   node scripts/notion.mjs sync-dashboard --now 2026-06-30
+ *   node scripts/oura.mjs day --date 2026-10-06 | \
+ *        node scripts/notion.mjs upsert-recovery [--takeaway "Solid night, push today"]
+ *   node scripts/oura.mjs workouts --date 2026-10-06 | node scripts/notion.mjs sync-oura-workouts
  *
  * Add --dry-run to `log` to validate and print the parsed row without writing it.
  */
@@ -237,7 +240,7 @@ async function resolveDbId(dbRef) {
  * the Dashboard holds, in order, the This Week / Goals / Body Stats tiles.
  */
 const TILE_ROWS = [
-  ["thisWeek", "goals", "bodyStats"],
+  ["thisWeek", "goals", "bodyStats", "recovery"],
   ["nextSession", "activeProgram"],
   ["nutrition", "quickCommands"],
 ];
@@ -493,6 +496,7 @@ const TILE_COLORS = {
   thisWeek: "gray_background",
   goals: "brown_background",
   bodyStats: "red_background",
+  recovery: "purple_background",
   nutrition: "green_background",
 };
 
@@ -728,6 +732,167 @@ function renderBodyStatsTile(latest) {
   return lines.join("\n");
 }
 
+function renderRecoveryTile(latest) {
+  const lines = [`> [🔋|${TILE_COLORS.recovery}] **Recovery**`];
+  if (!latest) {
+    lines.push("- No Oura days recorded yet.");
+  } else {
+    const parts = [];
+    if (latest.readiness !== "" && latest.readiness != null)
+      parts.push(`readiness ${latest.readiness}`);
+    if (latest.sleepHours !== "" && latest.sleepHours != null)
+      parts.push(`${latest.sleepHours}h sleep`);
+    if (latest.hrv !== "" && latest.hrv != null) parts.push(`HRV ${latest.hrv}ms`);
+    lines.push(`- ${[latest.date, parts.join(", ")].filter(Boolean).join(": ")}`);
+    if (latest.flags) lines.push(`- Flags: ${latest.flags}`);
+  }
+  return lines.join("\n");
+}
+
+// ─── Oura → Notion (Recovery rows and Workout Log enrichment) ───────────────
+
+const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const weekdayOf = (date) => WEEKDAYS[new Date(`${date}T00:00:00Z`).getUTCDay()];
+
+const numberOrNull = (n) => ({ number: n == null || Number.isNaN(Number(n)) ? null : Number(n) });
+
+/**
+ * Notion properties for one Recovery row, built from the JSON printed by
+ * `oura.mjs day`. Pure, so the numbers in Notion are exactly Oura's (they
+ * never pass through the model). A takeaway is only written when given, so a
+ * later re-sync of the numbers keeps the coach's earlier note.
+ */
+function recoveryProperties(day, takeaway) {
+  if (!day?.date || !/^\d{4}-\d{2}-\d{2}$/.test(day.date)) {
+    throw new Error("Expected the JSON from `oura.mjs day` (missing a YYYY-MM-DD date).");
+  }
+  const props = {
+    Day: { title: [{ text: { content: `${weekdayOf(day.date).slice(0, 3)} ${day.date}` } }] },
+    Date: { date: { start: day.date } },
+    Readiness: numberOrNull(day.readiness?.score),
+    "Sleep Score": numberOrNull(day.sleep?.score),
+    "Total Sleep (h)": numberOrNull(day.sleep?.totalHours),
+    "Avg HRV (ms)": numberOrNull(day.sleep?.avgHrv),
+    "Lowest HR (bpm)": numberOrNull(day.sleep?.lowestHr),
+    "Temp Dev (°C)": numberOrNull(day.readiness?.tempDeviation),
+    "Activity Score": numberOrNull(day.activity?.score),
+    Steps: numberOrNull(day.activity?.steps),
+    Flags: { multi_select: (day.flags ?? []).map((f) => ({ name: f.label })) },
+  };
+  if (typeof takeaway === "string" && takeaway.trim()) {
+    props["Coach Takeaway"] = { rich_text: [{ text: { content: takeaway.trim() } }] };
+  }
+  return props;
+}
+
+// Activities that count as cardio for Workout Log purposes (Oura activity ids
+// are lowercase/camelCase names such as "running", "indoorCycling").
+const CARDIO_RE =
+  /walk|run|jog|cycl|bik|hik|swim|row|ellip|stair|cardio|ski|skat|danc|tennis|padel|football|soccer|basket/i;
+// Unmatched cardio shorter than this is mentioned in chat
+// but not logged: Oura auto-detects a lot of incidental movement.
+const MIN_CREATE_MINUTES = 15;
+// Walks need more: Oura confirms lots of 15-20 minute "moderate" commute walks,
+// which are daily movement (already in steps), not training sessions.
+const MIN_WALK_CREATE_MINUTES = 30;
+
+const isCardio = (activity) => CARDIO_RE.test(activity ?? "");
+const hasCardioFocus = (row) => /cardio/i.test(row.focus ?? "");
+
+/**
+ * Decide, per Oura workout, whether to skip it, enrich an existing manually
+ * logged row, create a new row, or leave it for the coach to ask about.
+ * Pure over (workouts from `oura.mjs workouts`, Workout Log rows for the same
+ * dates as { id, date, source, ouraId, focus }). The Workout Log has no time
+ * of day, so matching is by date and type:
+ *   - already synced (a row carries this Oura id)          -> skip
+ *   - cardio: exactly one unenriched manual Cardio row     -> enrich it
+ *             walk < MIN_WALK_CREATE_MINUTES, or any cardio
+ *             < MIN_CREATE_MINUTES                          -> skip (minor)
+ *             otherwise                                     -> create (Source=Oura)
+ *   - other:  exactly one unenriched manual non-cardio row -> enrich it
+ *             otherwise                                     -> unmatched (ask)
+ * Strength sessions are never auto-created: the user logs those with their
+ * sets and loads, and a bare Oura row would only duplicate them.
+ */
+function planWorkoutSync(workouts, rows) {
+  const claimed = new Set(rows.filter((r) => r.ouraId).map((r) => r.id));
+  const synced = new Set(rows.map((r) => r.ouraId).filter(Boolean));
+  const plan = [];
+  for (const w of workouts) {
+    if (synced.has(w.id)) {
+      plan.push({ action: "skip", workout: w, reason: "already synced" });
+      continue;
+    }
+    const open = rows.filter(
+      (r) => r.date === w.day && r.source !== "Oura" && !r.ouraId && !claimed.has(r.id),
+    );
+    const cardio = isCardio(w.activity);
+    const candidates = open.filter((r) => (cardio ? hasCardioFocus(r) : !hasCardioFocus(r)));
+    if (candidates.length === 1) {
+      claimed.add(candidates[0].id);
+      plan.push({ action: "enrich", workout: w, rowId: candidates[0].id });
+    } else if (cardio) {
+      const minutes = w.durationMin ?? 0;
+      const minor = /walk/i.test(w.activity)
+        ? minutes < MIN_WALK_CREATE_MINUTES
+        : minutes < MIN_CREATE_MINUTES;
+      plan.push(
+        minor
+          ? { action: "skip", workout: w, reason: "minor activity" }
+          : { action: "create", workout: w },
+      );
+    } else {
+      plan.push({
+        action: "unmatched",
+        workout: w,
+        reason: candidates.length
+          ? "several logged sessions that day"
+          : "no logged session that day",
+      });
+    }
+  }
+  return plan;
+}
+
+/** "Z1 5 · Z2 22 · Z3 10 · Z4 3 · Z5 0" from zone minutes, or "" when unknown. */
+function formatZones(zones) {
+  if (!zones) return "";
+  return ["z1", "z2", "z3", "z4", "z5"]
+    .map((z) => `${z.toUpperCase()} ${zones[z] ?? 0}`)
+    .join(" · ");
+}
+
+/** Workout Log properties for an Oura workout (enrich = only the Oura fields). */
+function ouraWorkoutProperties(w, { create = false } = {}) {
+  const zones = w.zonesMin ?? null;
+  const props = {
+    "Oura ID": { rich_text: [{ text: { content: w.id } }] },
+    Calories: numberOrNull(w.calories),
+    "Distance (km)": numberOrNull(w.distanceKm),
+    "Avg HR (bpm)": numberOrNull(w.avgHr),
+    "Max HR (bpm)": numberOrNull(w.maxHr),
+    "HR Zones": { rich_text: zones ? [{ text: { content: formatZones(zones) } }] : [] },
+    "Z2 (min)": numberOrNull(zones?.z2),
+    "Z4-5 (min)": numberOrNull(zones ? (zones.z4 ?? 0) + (zones.z5 ?? 0) : null),
+  };
+  if (create) {
+    const name = String(w.label || w.activity || "Workout")
+      .replace(/([a-z])([A-Z])/g, "$1 $2")
+      .replace(/^./, (c) => c.toUpperCase());
+    Object.assign(props, {
+      Session: { title: [{ text: { content: `${name} (Oura)` } }] },
+      Date: { date: { start: w.day } },
+      Day: { select: { name: weekdayOf(w.day) } },
+      Focus: { multi_select: [{ name: "Cardio" }] },
+      Status: { select: { name: "Completed" } },
+      "Duration (min)": numberOrNull(w.durationMin),
+      Source: { select: { name: "Oura" } },
+    });
+  }
+  return props;
+}
+
 /**
  * Replace a column's children with fresh content, append-then-delete: write the
  * new blocks first, then delete the previously-existing ones. A failure mid-append
@@ -922,7 +1087,142 @@ async function cmdSyncDashboard(args) {
     await replaceTileContent(cols.bodyStats, renderBodyStatsTile(latest), TILE_COLORS.bodyStats);
   }
 
-  console.log("Synced Dashboard tiles (This Week, Goals, Body Stats) from Notion.");
+  // Recovery: the latest Oura day (only on Dashboards built with Oura enabled).
+  let synced = "This Week, Goals, Body Stats";
+  if (cols.recovery) {
+    const rId = await resolveDbId("Recovery");
+    const res = await notion(`/databases/${rId}/query`, "POST", {
+      page_size: 1,
+      sorts: [{ property: "Date", direction: "descending" }],
+    });
+    const p = res.results?.[0]?.properties;
+    const latest = p
+      ? {
+          date: readProp(p.Date),
+          readiness: readProp(p.Readiness),
+          sleepHours: readProp(p["Total Sleep (h)"]),
+          hrv: readProp(p["Avg HRV (ms)"]),
+          flags: readProp(p.Flags),
+        }
+      : null;
+    await replaceTileContent(cols.recovery, renderRecoveryTile(latest), TILE_COLORS.recovery);
+    synced += ", Recovery";
+  }
+
+  console.log(`Synced Dashboard tiles (${synced}) from Notion.`);
+}
+
+/** Read a JSON document from --json or, when absent, from stdin (for pipes). */
+async function readJsonInput(args) {
+  let raw = typeof args.json === "string" ? args.json : "";
+  if (!raw) {
+    if (process.stdin.isTTY) throw new Error("Pipe the oura.mjs JSON in, or pass --json '<json>'.");
+    const chunks = [];
+    for await (const c of process.stdin) chunks.push(c);
+    raw = Buffer.concat(chunks).toString("utf8");
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error("Input is not valid JSON. Pipe the output of scripts/oura.mjs straight in.");
+  }
+}
+
+/**
+ * Upsert one Recovery row (keyed by Date) from `oura.mjs day` JSON, so
+ * re-running the lunch job or a retry never creates a duplicate day.
+ */
+async function cmdUpsertRecovery(args) {
+  const day = await readJsonInput(args);
+  const properties = recoveryProperties(day, args.takeaway === true ? "" : args.takeaway);
+  const dbId = await resolveDbId("Recovery");
+  const existing = await notion(`/databases/${dbId}/query`, "POST", {
+    filter: { property: "Date", date: { equals: day.date } },
+    page_size: 2,
+  });
+  const row = existing.results?.[0];
+  if (row) {
+    await notion(`/pages/${row.id}`, "PATCH", { properties });
+    console.log(`Updated Recovery ${day.date} (${row.id})`);
+  } else {
+    const page = await notion("/pages", "POST", { parent: { database_id: dbId }, properties });
+    console.log(`Created Recovery ${day.date} (${page.id})`);
+  }
+}
+
+/**
+ * Apply Oura workouts (JSON from `oura.mjs workouts`) to the Workout Log using
+ * planWorkoutSync: enrich the matching logged session, create a row for
+ * unlogged cardio, and report anything that needs the user. Idempotent via
+ * the Oura ID property. Prints one line per workout for the coach to relay.
+ */
+async function cmdSyncOuraWorkouts(args) {
+  const input = await readJsonInput(args);
+  const workouts = input.workouts ?? [];
+  if (!workouts.length) {
+    console.log(`No Oura workouts for ${input.date ?? "that day"}.`);
+    return;
+  }
+  const wlId = await resolveDbId("Workout Log");
+  const schema = (await notion(`/databases/${wlId}`)).properties ?? {};
+  const missing = [
+    "Oura ID",
+    "Source",
+    "Calories",
+    "Distance (km)",
+    "Avg HR (bpm)",
+    "Max HR (bpm)",
+    "HR Zones",
+    "Z2 (min)",
+    "Z4-5 (min)",
+  ].filter((k) => !schema[k]);
+  if (missing.length) {
+    throw new Error(
+      `Workout Log is missing ${missing.join(", ")}. Run \`node scripts/setup-workspace.mjs\` (with OURA_CLIENT_ID set) to add them.`,
+    );
+  }
+  const dates = [...new Set(workouts.map((w) => w.day))].sort();
+  const res = await notion(`/databases/${wlId}/query`, "POST", {
+    filter: {
+      and: [
+        { property: "Date", date: { on_or_after: dates[0] } },
+        { property: "Date", date: { on_or_before: dates.at(-1) } },
+      ],
+    },
+    page_size: 100,
+  });
+  const rows = (res.results ?? []).map((pg) => ({
+    id: pg.id,
+    date: readProp(pg.properties?.Date),
+    title: readProp(pg.properties?.Session),
+    source: readProp(pg.properties?.Source),
+    ouraId: readProp(pg.properties?.["Oura ID"]),
+    focus: readProp(pg.properties?.Focus),
+    duration: readProp(pg.properties?.["Duration (min)"]),
+  }));
+
+  for (const step of planWorkoutSync(workouts, rows)) {
+    const w = step.workout;
+    const hr = w.avgHr != null ? `, avg HR ${w.avgHr}, max ${w.maxHr}` : "";
+    const what = `${w.activity} ${w.day} ${w.start?.slice(11, 16) ?? ""} (${w.durationMin ?? "?"} min, ${w.intensity ?? "?"}${hr})`;
+    if (step.action === "enrich") {
+      const row = rows.find((r) => r.id === step.rowId);
+      const properties = ouraWorkoutProperties(w);
+      if (row && (row.duration === "" || row.duration == null) && w.durationMin != null) {
+        properties["Duration (min)"] = numberOrNull(w.durationMin);
+      }
+      await notion(`/pages/${step.rowId}`, "PATCH", { properties });
+      console.log(`enriched: ${what} -> "${row?.title ?? step.rowId}"`);
+    } else if (step.action === "create") {
+      const page = await notion("/pages", "POST", {
+        parent: { database_id: wlId },
+        properties: ouraWorkoutProperties(w, { create: true }),
+      });
+      console.log(`created: ${what} -> new row ${page.id}`);
+    } else {
+      console.log(`${step.action}: ${what} (${step.reason})`);
+    }
+  }
 }
 
 /**
@@ -1003,6 +1303,8 @@ const COMMANDS = {
   "refresh-tile": cmdRefreshTile,
   "sync-dashboard": cmdSyncDashboard,
   "create-page": cmdCreatePage,
+  "upsert-recovery": cmdUpsertRecovery,
+  "sync-oura-workouts": cmdSyncOuraWorkouts,
 };
 
 async function main() {
@@ -1041,4 +1343,9 @@ export {
   renderThisWeekTile,
   renderGoalsTile,
   renderBodyStatsTile,
+  renderRecoveryTile,
+  recoveryProperties,
+  planWorkoutSync,
+  ouraWorkoutProperties,
+  formatZones,
 };
