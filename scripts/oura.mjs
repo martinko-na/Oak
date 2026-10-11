@@ -417,6 +417,11 @@ function aggregateDay(day, { readiness, dailySleep, sleepPeriods, activity }) {
           score: act.score ?? null,
           steps: act.steps ?? null,
           activeCalories: act.active_calories ?? null,
+          // Oura's estimate of the whole day's expenditure (BMR + activity), so
+          // it is only complete once the day is over. Used for net energy balance
+          // against the Nutrition Log, which is why it is deliberately the day
+          // total rather than the active portion above.
+          totalCalories: act.total_calories ?? null,
           highMinutes: round((act.high_activity_time ?? 0) / 60),
           mediumMinutes: round((act.medium_activity_time ?? 0) / 60),
         }

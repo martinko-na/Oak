@@ -10,11 +10,11 @@ name.
 
 | Skill | What it does |
 |---|---|
-| `setup-notion` | Builds the full Notion workspace (Programs, Goals, Body Stats, Workout Log, Dashboard) idempotently. |
+| `setup-notion` | Builds the full Notion workspace (Programs, Goals, Body Stats, Workout Log, Nutrition Log, Dashboard) idempotently. |
 | `log-workout` | Records a session to the Workout Log. Logs only what you actually said; never invents RPE, notes, or dates; asks "real or testing?" when a session's reality is unclear. |
 | `recommend-workout` | Suggests today's session, grounded in your goals and the last sessions pulled from Notion. Checks `PERSONAL.md` on the first message and asks for missing goals/nutrition before coaching on assumptions. |
 | `weekly-plan` | Builds the week's plan from goals and recent volume, written to Notion. |
-| `nutrition-advice` | Food, macros, and meal guidance tied to your goals. |
+| `nutrition-advice` | Food, macros, and meal guidance tied to your goals, and logging what you ate to the Nutrition Log (one row per day, each meal a line on the page). Estimates from a photo are stated as estimates. |
 | `progress-report` | Consistency, volume trends, and personal records, optionally saved as a formatted Notion page. |
 | `find-exercises` | Looks up real exercises (see below). |
 | `notion-formatting` | How to write clean, structured Notion pages and keep the Dashboard in sync. |

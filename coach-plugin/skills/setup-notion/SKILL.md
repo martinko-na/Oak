@@ -6,8 +6,8 @@ description: First-time setup of the Notion training workspace. Use when the use
 # Set up the Notion training workspace
 
 Build the full coaching workspace under the user's Hub page: the Programs, Goals,
-Body Stats, and Workout Log databases, an initial program row, and a Dashboard
-page. This is deterministic and idempotent, handled by a bundled script.
+Body Stats, Workout Log, and Nutrition Log databases, an initial program row, a
+Knowledge Base page, and a Dashboard page. This is deterministic and idempotent, handled by a bundled script.
 
 ## 1. Check configuration
 
@@ -28,7 +28,8 @@ node scripts/setup-workspace.mjs --hub <pageId>
 ```
 
 It builds in the strict order the relations require (Programs, Goals, Body Stats,
-Workout Log, initial program row, Dashboard), detects anything that already
+Workout Log, Nutrition Log, Recovery with Oura, initial program row, Knowledge
+Base, Dashboard), detects anything that already
 exists by title and reuses it (never duplicates), and writes all resolved ids
 (databases, Dashboard page, and the Dashboard column ids for tile updates) to
 `data/notion-ids.json`. To regenerate the Dashboard layout, add

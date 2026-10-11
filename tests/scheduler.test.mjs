@@ -117,9 +117,9 @@ test("seeds the default reminders when no schedule file exists and an owner is s
   await scheduler.initScheduler();
 
   const ids = scheduler.listTasks().map((t) => t.id);
-  assert.deepEqual(ids, ["morning-nudge", "weekly-plan"]);
+  assert.deepEqual(ids, ["morning-nudge", "nutrition-nudge", "weekly-plan"]);
   assert.ok(scheduler.listTasks().every((t) => t.chatId === "99"));
-  assert.equal(JSON.parse(fs.readFileSync(scheduleFile, "utf-8")).length, 2);
+  assert.equal(JSON.parse(fs.readFileSync(scheduleFile, "utf-8")).length, 3);
 });
 
 test("seeds nothing when there is no owner chat to send reminders to", async () => {
@@ -173,7 +173,7 @@ test("a corrupt schedule file falls back to the defaults instead of throwing", a
   const scheduler = await import(`../dist/scheduler/scheduler.js?instance=corrupt-${instance}`);
   await scheduler.initScheduler();
 
-  assert.equal(scheduler.listTasks().length, 2);
+  assert.equal(scheduler.listTasks().length, 3);
 });
 
 // ─── Oura defaults and one-shot tasks ─────────────────────────────────────────
@@ -195,7 +195,7 @@ test("seeds the lunch recovery recap only when Oura is configured", async () => 
   await scheduler.initScheduler();
 
   const ids = scheduler.listTasks().map((t) => t.id);
-  assert.deepEqual(ids, ["morning-nudge", "lunch-recovery", "weekly-plan"]);
+  assert.deepEqual(ids, ["morning-nudge", "lunch-recovery", "nutrition-nudge", "weekly-plan"]);
   assert.equal(scheduler.getTask("lunch-recovery").cron, "30 12 * * *");
 });
 

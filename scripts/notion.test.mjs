@@ -2,15 +2,20 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   buildPropertyValue,
+  formatMealLine,
   formatZones,
   markdownToBlocks,
+  nutritionProperties,
+  nutritionTotals,
   optionNames,
   ouraWorkoutProperties,
   parseInline,
+  parseMealLine,
   planWorkoutSync,
   recoveryProperties,
   renderBodyStatsTile,
   renderGoalsTile,
+  renderNutritionTile,
   renderRecoveryTile,
   renderThisWeekTile,
   startOfWeekUTC,
@@ -125,6 +130,7 @@ test("tile renderers carry their canonical, distinct colors", () => {
   assert.equal(color(renderThisWeekTile([])), "gray_background");
   assert.equal(color(renderGoalsTile([])), "brown_background");
   assert.equal(color(renderBodyStatsTile(null)), "red_background");
+  assert.equal(color(renderNutritionTile(null, null, null)), "green_background");
 });
 
 test("markdownToBlocks: table parses cells and skips the separator row", () => {
@@ -246,7 +252,7 @@ const ouraDay = {
   ready: true,
   readiness: { score: 58, tempDeviation: 0.6 },
   sleep: { score: 71, totalHours: 5.8, avgHrv: 38, lowestHr: 54 },
-  activity: { score: 80, steps: 9500 },
+  activity: { score: 80, steps: 9500, totalCalories: 2550 },
   flags: [
     { code: "temp_elevated", label: "Temp elevated" },
     { code: "low_readiness", label: "Low readiness" },
@@ -262,6 +268,7 @@ test("recoveryProperties maps oura.mjs day JSON onto the Recovery schema", () =>
   assert.equal(p["Avg HRV (ms)"].number, 38);
   assert.equal(p["Temp Dev (°C)"].number, 0.6);
   assert.equal(p.Steps.number, 9500);
+  assert.equal(p["Total Calories (kcal)"].number, 2550);
   assert.deepEqual(
     p.Flags.multi_select.map((f) => f.name),
     ["Temp elevated", "Low readiness"],
@@ -278,6 +285,7 @@ test("recoveryProperties keeps missing values as null and leaves the takeaway al
   });
   assert.equal(p.Readiness.number, null);
   assert.equal(p.Steps.number, null);
+  assert.equal(p["Total Calories (kcal)"].number, null);
   assert.deepEqual(p.Flags.multi_select, []);
   assert.equal("Coach Takeaway" in p, false);
 });
@@ -402,4 +410,156 @@ test("zone minutes become a readable summary plus Z2 and Z4-5 numbers", () => {
   assert.deepEqual(none["HR Zones"].rich_text, []);
   assert.equal(none["Z2 (min)"].number, null);
   assert.equal(none["Z4-5 (min)"].number, null);
+});
+
+// ─── Nutrition Log ────────────────────────────────────────────────────────────
+
+test("formatMealLine and parseMealLine round-trip a full meal", () => {
+  const meal = {
+    time: "13:00",
+    name: "Chicken rice bowl",
+    kcal: 710,
+    protein: 58,
+    carbs: 72,
+    fat: 18,
+  };
+  const line = formatMealLine(meal);
+  assert.equal(line, "13:00 Chicken rice bowl | 710 kcal · 58g P · 72g C · 18g F");
+  assert.deepEqual(parseMealLine(line), meal);
+});
+
+test("formatMealLine omits absent macros and the timestamp", () => {
+  const line = formatMealLine({ name: "Oats + whey", kcal: 520, protein: 42 });
+  assert.equal(line, "Oats + whey | 520 kcal · 42g P");
+  assert.deepEqual(parseMealLine(line), {
+    time: null,
+    name: "Oats + whey",
+    kcal: 520,
+    protein: 42,
+    carbs: null,
+    fat: null,
+  });
+});
+
+test("formatMealLine strips the field separator out of the meal name", () => {
+  const line = formatMealLine({ name: "Rice | beans", kcal: 400 });
+  assert.equal(line, "Rice beans | 400 kcal");
+  assert.equal(parseMealLine(line).name, "Rice beans");
+});
+
+test("formatMealLine rejects a nameless meal or a non-numeric calorie count", () => {
+  assert.throws(() => formatMealLine({ name: "  ", kcal: 100 }), /needs a name/);
+  assert.throws(() => formatMealLine({ name: "Toast", kcal: "lots" }), /--kcal/);
+});
+
+test("parseMealLine ignores lines it did not write", () => {
+  assert.equal(parseMealLine("Felt hungry all afternoon"), null);
+  assert.equal(parseMealLine(""), null);
+  assert.equal(parseMealLine("Big lunch | no idea"), null);
+});
+
+test("nutritionTotals sums the meals and skips unparseable lines", () => {
+  const totals = nutritionTotals([
+    "08:15 Oats + whey | 520 kcal · 42g P · 58g C · 12g F",
+    "A note the user typed on the page",
+    "13:00 Chicken rice bowl | 710 kcal · 58g P · 72g C · 18g F",
+  ]);
+  assert.deepEqual(totals, { kcal: 1230, protein: 100, carbs: 130, fat: 30, meals: 2 });
+});
+
+test("nutritionTotals leaves a macro null when no meal recorded it", () => {
+  const totals = nutritionTotals(["Oats | 520 kcal · 42g P", "Apple | 95 kcal"]);
+  assert.equal(totals.kcal, 615);
+  assert.equal(totals.protein, 42);
+  assert.equal(totals.carbs, null);
+  assert.equal(totals.fat, null);
+  assert.equal(totals.meals, 2);
+});
+
+test("nutritionTotals on an empty page is a zero-meal day, not a zero-calorie one", () => {
+  const totals = nutritionTotals([]);
+  assert.equal(totals.kcal, null);
+  assert.equal(totals.meals, 0);
+});
+
+test("nutritionProperties maps totals onto the Nutrition Log schema", () => {
+  const p = nutritionProperties("2026-10-11", {
+    kcal: 1230,
+    protein: 100,
+    carbs: null,
+    fat: null,
+    meals: 2,
+  });
+  assert.equal(p.Day.title[0].text.content, "Sun 2026-10-11");
+  assert.equal(p.Date.date.start, "2026-10-11");
+  assert.equal(p.Calories.number, 1230);
+  assert.equal(p["Protein (g)"].number, 100);
+  // Macros nobody logged stay empty rather than reading as zero.
+  assert.equal(p["Carbs (g)"].number, null);
+  assert.equal(p.Meals.number, 2);
+  assert.equal("Notes" in p, false);
+});
+
+test("nutritionProperties writes notes only when given, and rejects a bad date", () => {
+  const p = nutritionProperties("2026-10-11", nutritionTotals([]), "  Travel day  ");
+  assert.equal(p.Notes.rich_text[0].text.content, "Travel day");
+  assert.throws(() => nutritionProperties("11/10/2026", nutritionTotals([])), /YYYY-MM-DD/);
+});
+
+test("renderNutritionTile: an empty day still shows the target", () => {
+  const md = renderNutritionTile(null, { kcal: 2200, protein: 180 }, null);
+  assert.match(md, /Nothing logged today yet/);
+  assert.match(md, /Target: 2200 kcal · 180g protein/);
+});
+
+test("renderNutritionTile: an empty day with no target set says nothing about targets", () => {
+  const md = renderNutritionTile(null, null, null);
+  assert.match(md, /Nothing logged today yet/);
+  assert.equal(/Target/.test(md), false);
+});
+
+test("renderNutritionTile: under target reports what is left", () => {
+  const md = renderNutritionTile(
+    { date: "2026-10-11", kcal: 1840, protein: 152, carbs: 180, fat: 61, meals: 3 },
+    { kcal: 2200, protein: 180 },
+    null,
+  );
+  assert.match(md, /Today: 1840 \/ 2200 kcal \(360 left\)/);
+  assert.match(md, /Protein: 152g \/ 180g/);
+  assert.match(md, /180g C · 61g F · 3 meals/);
+});
+
+test("renderNutritionTile: over target reports the overshoot", () => {
+  const md = renderNutritionTile(
+    { date: "2026-10-11", kcal: 2500, meals: 4 },
+    { kcal: 2200 },
+    null,
+  );
+  assert.match(md, /Today: 2500 \/ 2200 kcal \(300 over\)/);
+});
+
+test("renderNutritionTile: without targets it reports intake alone", () => {
+  const md = renderNutritionTile(
+    { date: "2026-10-11", kcal: 1840, protein: 152, meals: 3 },
+    null,
+    null,
+  );
+  assert.match(md, /Today: 1840 kcal/);
+  assert.match(md, /Protein: 152g$/m);
+});
+
+test("renderNutritionTile: yesterday's net balance is signed, and only shown with both halves", () => {
+  const today = { date: "2026-10-11", kcal: 1840, meals: 3 };
+  const deficit = renderNutritionTile(today, { kcal: 2200 }, { intake: 2100, out: 2550 });
+  assert.match(deficit, /Yesterday: 2100 in, 2550 out \(-450\)/);
+  const surplus = renderNutritionTile(today, { kcal: 2200 }, { intake: 2800, out: 2550 });
+  assert.match(surplus, /\(\+250\)/);
+  // No Oura expenditure for the day: the line is dropped rather than guessed at.
+  const partial = renderNutritionTile(today, { kcal: 2200 }, { intake: 2100, out: "" });
+  assert.equal(/Yesterday/.test(partial), false);
+});
+
+test("renderNutritionTile: a day with a single meal is not pluralised", () => {
+  const md = renderNutritionTile({ date: "2026-10-11", kcal: 520, meals: 1 }, null, null);
+  assert.match(md, /1 meal$/m);
 });

@@ -36,8 +36,12 @@
  *   node scripts/oura.mjs day --date 2026-10-06 | \
  *        node scripts/notion.mjs upsert-recovery [--takeaway "Solid night, push today"]
  *   node scripts/oura.mjs workouts --date 2026-10-06 | node scripts/notion.mjs sync-oura-workouts
+ *   node scripts/notion.mjs set-nutrition-target --kcal 2200 --protein 180
+ *   node scripts/notion.mjs log-meal --date 2026-10-11 --time 13:00 \
+ *        --meal "Chicken rice bowl" --kcal 710 --protein 58 --carbs 72 --fat 18
+ *   node scripts/notion.mjs recompute-nutrition --date 2026-10-11
  *
- * Add --dry-run to `log` to validate and print the parsed row without writing it.
+ * Add --dry-run to `log` or `log-meal` to validate and print without writing.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -120,6 +124,27 @@ function writeCache(cache) {
   const tmp = `${CACHE_FILE}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(cache, null, 2));
   fs.renameSync(tmp, CACHE_FILE);
+}
+
+// ─── nutrition targets ───────────────────────────────────────────────────────
+// The authoritative daily intake targets, kept machine-readable so the Dashboard
+// tile compares against a number read from disk rather than one the model typed.
+// PERSONAL.md keeps the human-readable copy for the coach's own prose.
+const TARGETS_FILE = path.resolve(process.cwd(), "data", "nutrition-targets.json");
+
+function readTargets() {
+  try {
+    return JSON.parse(fs.readFileSync(TARGETS_FILE, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function writeTargets(targets) {
+  fs.mkdirSync(path.dirname(TARGETS_FILE), { recursive: true });
+  const tmp = `${TARGETS_FILE}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(targets, null, 2));
+  fs.renameSync(tmp, TARGETS_FILE);
 }
 
 // ─── Hub scoping ─────────────────────────────────────────────────────────────
@@ -749,6 +774,158 @@ function renderRecoveryTile(latest) {
   return lines.join("\n");
 }
 
+// ─── Nutrition Log (one row per day, meals in the page body) ────────────────
+
+/**
+ * Canonical text for one meal line in a Nutrition Log page body:
+ *
+ *   08:15 Oats + whey | 520 kcal · 42g P · 58g C · 12g F
+ *
+ * This format is the storage: the day's totals in the row properties are always
+ * re-derived from these lines (never incremented), so correcting a day is a
+ * matter of editing or deleting a line and re-running `recompute-nutrition`.
+ * Pipes are stripped from the name because the pipe is the field separator.
+ */
+function formatMealLine({ time, name, kcal, protein, carbs, fat }) {
+  const clean = String(name ?? "")
+    .replace(/[|\n]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!clean) throw new Error("A meal needs a name (--meal).");
+  const energy = Number(kcal);
+  if (!Number.isFinite(energy) || energy < 0) {
+    throw new Error(`--kcal must be a number of calories, got "${kcal}".`);
+  }
+  const macros = [
+    [protein, "P"],
+    [carbs, "C"],
+    [fat, "F"],
+  ]
+    .filter(([v]) => v != null && v !== "" && Number.isFinite(Number(v)))
+    .map(([v, tag]) => `${Number(v)}g ${tag}`);
+  const stamp = /^\d{1,2}:\d{2}$/.test(String(time ?? "")) ? `${time} ` : "";
+  return [`${stamp}${clean} | ${energy} kcal`, ...macros].join(" · ");
+}
+
+/** Inverse of formatMealLine. Returns null for any line it did not write, so
+ *  free-text notes can live on the page without corrupting the totals. */
+function parseMealLine(text) {
+  const m = /^(?:(\d{1,2}:\d{2})\s+)?([^|]+?)\s*\|\s*(\d+(?:\.\d+)?)\s*kcal(.*)$/i.exec(
+    String(text ?? "").trim(),
+  );
+  if (!m) return null;
+  const [, time, name, kcal, tail] = m;
+  const macro = (tag) => {
+    const hit = new RegExp(`(\\d+(?:\\.\\d+)?)\\s*g\\s*${tag}\\b`, "i").exec(tail);
+    return hit ? Number(hit[1]) : null;
+  };
+  return {
+    time: time ?? null,
+    name: name.trim(),
+    kcal: Number(kcal),
+    protein: macro("P"),
+    carbs: macro("C"),
+    fat: macro("F"),
+  };
+}
+
+/** Round to one decimal, killing float noise from summing parsed decimals. */
+const round1 = (n) => Math.round(n * 10) / 10;
+
+/**
+ * Sum a day's meal lines. A macro stays null unless at least one meal recorded
+ * it, so a day logged without carbs shows an empty Notion cell rather than a
+ * misleading 0. Unparseable lines are ignored and counted nowhere.
+ */
+function nutritionTotals(lines) {
+  const meals = (lines ?? []).map(parseMealLine).filter(Boolean);
+  const sum = (key) => {
+    const present = meals.map((m) => m[key]).filter((v) => v != null);
+    return present.length ? round1(present.reduce((a, b) => a + b, 0)) : null;
+  };
+  return {
+    kcal: sum("kcal"),
+    protein: sum("protein"),
+    carbs: sum("carbs"),
+    fat: sum("fat"),
+    meals: meals.length,
+  };
+}
+
+/**
+ * Notion properties for one Nutrition Log row. Pure, and fed only by
+ * nutritionTotals, so the numbers in Notion are a sum of the logged lines and
+ * never a value the model typed. Notes are written only when given, so a
+ * recompute keeps an earlier note.
+ */
+function nutritionProperties(date, totals, notes) {
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    throw new Error(`Expected a YYYY-MM-DD date, got "${date}".`);
+  }
+  const props = {
+    Day: { title: [{ text: { content: `${weekdayOf(date).slice(0, 3)} ${date}` } }] },
+    Date: { date: { start: date } },
+    Calories: numberOrNull(totals?.kcal),
+    "Protein (g)": numberOrNull(totals?.protein),
+    "Carbs (g)": numberOrNull(totals?.carbs),
+    "Fat (g)": numberOrNull(totals?.fat),
+    Meals: numberOrNull(totals?.meals),
+  };
+  if (typeof notes === "string" && notes.trim()) {
+    props.Notes = { rich_text: [{ text: { content: notes.trim() } }] };
+  }
+  return props;
+}
+
+/**
+ * Nutrition tile. `today` is the day's row (or null), `targets` the contents of
+ * data/nutrition-targets.json (or null), `net` yesterday's complete-day energy
+ * balance (or null). Today's expenditure is deliberately absent: Oura's daily
+ * total is still accumulating, so a net figure for today would understate the
+ * burn and read as a bigger surplus than it is.
+ */
+function renderNutritionTile(today, targets, net) {
+  const lines = [`> [🍽️|${TILE_COLORS.nutrition}] **Nutrition**`];
+  const has = (v) => v != null && v !== "";
+  const tKcal = has(targets?.kcal) ? Number(targets.kcal) : null;
+  const tProtein = has(targets?.protein) ? Number(targets.protein) : null;
+
+  if (!today || !has(today.kcal)) {
+    lines.push("- Nothing logged today yet.");
+    if (tKcal != null || tProtein != null) {
+      const parts = [];
+      if (tKcal != null) parts.push(`${tKcal} kcal`);
+      if (tProtein != null) parts.push(`${tProtein}g protein`);
+      lines.push(`- Target: ${parts.join(" · ")}`);
+    }
+  } else {
+    const kcal = Number(today.kcal);
+    const energy =
+      tKcal != null
+        ? `${kcal} / ${tKcal} kcal (${kcal <= tKcal ? `${round1(tKcal - kcal)} left` : `${round1(kcal - tKcal)} over`})`
+        : `${kcal} kcal`;
+    lines.push(`- Today: ${energy}`);
+    if (has(today.protein)) {
+      const p = Number(today.protein);
+      lines.push(`- Protein: ${p}g${tProtein != null ? ` / ${tProtein}g` : ""}`);
+    }
+    const detail = [];
+    if (has(today.carbs)) detail.push(`${Number(today.carbs)}g C`);
+    if (has(today.fat)) detail.push(`${Number(today.fat)}g F`);
+    if (has(today.meals)) {
+      detail.push(`${Number(today.meals)} meal${Number(today.meals) === 1 ? "" : "s"}`);
+    }
+    if (detail.length) lines.push(`- ${detail.join(" · ")}`);
+  }
+
+  if (net && has(net.intake) && has(net.out)) {
+    const diff = round1(Number(net.intake) - Number(net.out));
+    const sign = diff > 0 ? `+${diff}` : `${diff}`;
+    lines.push(`- Yesterday: ${Number(net.intake)} in, ${Number(net.out)} out (${sign})`);
+  }
+  return lines.join("\n");
+}
+
 // ─── Oura → Notion (Recovery rows and Workout Log enrichment) ───────────────
 
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -777,6 +954,7 @@ function recoveryProperties(day, takeaway) {
     "Temp Dev (°C)": numberOrNull(day.readiness?.tempDeviation),
     "Activity Score": numberOrNull(day.activity?.score),
     Steps: numberOrNull(day.activity?.steps),
+    "Total Calories (kcal)": numberOrNull(day.activity?.totalCalories),
     Flags: { multi_select: (day.flags ?? []).map((f) => ({ name: f.label })) },
   };
   if (typeof takeaway === "string" && takeaway.trim()) {
@@ -1109,6 +1287,63 @@ async function cmdSyncDashboard(args) {
     synced += ", Recovery";
   }
 
+  // Nutrition: today's intake against the stored targets, plus yesterday's
+  // energy balance when Oura is recording expenditure. Today's balance is
+  // deliberately not shown: Oura's day total is still accumulating.
+  if (cols.nutrition) {
+    try {
+      const nId = await resolveDbId("Nutrition Log");
+      const todayISO = isoDate(now);
+      const yesterdayISO = isoDate(new Date(now.getTime() - 86_400_000));
+      const res = await notion(`/databases/${nId}/query`, "POST", {
+        filter: {
+          and: [
+            { property: "Date", date: { on_or_after: yesterdayISO } },
+            { property: "Date", date: { on_or_before: todayISO } },
+          ],
+        },
+        page_size: 10,
+      });
+      const byDate = new Map();
+      for (const pg of res.results ?? []) {
+        const p = pg.properties ?? {};
+        byDate.set(readProp(p.Date), {
+          date: readProp(p.Date),
+          kcal: readProp(p.Calories),
+          protein: readProp(p["Protein (g)"]),
+          carbs: readProp(p["Carbs (g)"]),
+          fat: readProp(p["Fat (g)"]),
+          meals: readProp(p.Meals),
+        });
+      }
+
+      let net = null;
+      if (cols.recovery) {
+        const rId = await resolveDbId("Recovery");
+        const rec = await notion(`/databases/${rId}/query`, "POST", {
+          filter: { property: "Date", date: { equals: yesterdayISO } },
+          page_size: 1,
+        });
+        const out = readProp(rec.results?.[0]?.properties?.["Total Calories (kcal)"]);
+        const intake = byDate.get(yesterdayISO)?.kcal;
+        if (out !== "" && out != null && intake !== "" && intake != null) net = { intake, out };
+      }
+
+      await replaceTileContent(
+        cols.nutrition,
+        renderNutritionTile(byDate.get(todayISO) ?? null, readTargets(), net),
+        TILE_COLORS.nutrition,
+      );
+      synced += ", Nutrition";
+    } catch (err) {
+      // A workspace built before Nutrition Log existed must not break the whole
+      // sync: the other tiles are already written, so report and carry on.
+      console.warn(
+        `Skipped the Nutrition tile: ${err.message}. Run \`node scripts/setup-workspace.mjs\` to add the Nutrition Log database.`,
+      );
+    }
+  }
+
   console.log(`Synced Dashboard tiles (${synced}) from Notion.`);
 }
 
@@ -1148,6 +1383,149 @@ async function cmdUpsertRecovery(args) {
     const page = await notion("/pages", "POST", { parent: { database_id: dbId }, properties });
     console.log(`Created Recovery ${day.date} (${page.id})`);
   }
+}
+
+/** Require a YYYY-MM-DD date: the coach must pass the date from the Telegram
+ *  header rather than let the script guess in the server's timezone. */
+function requireIsoDate(value, flag = "--date") {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw new Error(`${flag} is required as YYYY-MM-DD (use the date from the Telegram header).`);
+  }
+  return value;
+}
+
+/** Plain text of any block that carries rich text, so a meal typed as a
+ *  paragraph still counts towards the day. */
+function blockPlainText(block) {
+  const body = block?.[block?.type];
+  const rt = body?.rich_text;
+  return Array.isArray(rt) ? rt.map((t) => t.plain_text ?? "").join("") : "";
+}
+
+/** The Nutrition Log row for a date, or null. */
+async function findNutritionRow(dbId, date) {
+  const res = await notion(`/databases/${dbId}/query`, "POST", {
+    filter: { property: "Date", date: { equals: date } },
+    page_size: 2,
+  });
+  return res.results?.[0] ?? null;
+}
+
+/**
+ * Re-derive a day's totals from the meal lines on its page and write them to the
+ * row. This is the only thing that ever sets the totals, so the properties are
+ * always exactly the sum of what is on the page.
+ */
+async function recomputeNutritionDay(pageId, date) {
+  const lines = (await listChildren(pageId)).map(blockPlainText);
+  const totals = nutritionTotals(lines);
+  await notion(`/pages/${pageId}`, "PATCH", { properties: nutritionProperties(date, totals) });
+  return totals;
+}
+
+/**
+ * Append one meal to a day's Nutrition Log page (creating the row if this is the
+ * day's first meal), then recompute the day's totals from the page.
+ */
+async function cmdLogMeal(args) {
+  const date = requireIsoDate(args.date);
+  const line = formatMealLine({
+    time: args.time,
+    name: args.meal ?? args.name,
+    kcal: args.kcal,
+    protein: args.protein,
+    carbs: args.carbs,
+    fat: args.fat,
+  });
+  if (args["dry-run"] === true) {
+    console.log(`[dry-run] ${date}: ${line}`);
+    return;
+  }
+
+  const dbId = await resolveDbId("Nutrition Log");
+  let row = await findNutritionRow(dbId, date);
+  if (!row) {
+    row = await notion("/pages", "POST", {
+      parent: { database_id: dbId },
+      icon: { type: "emoji", emoji: "🍽️" },
+      properties: nutritionProperties(date, nutritionTotals([])),
+    });
+    console.log(`Created Nutrition Log ${date} (${row.id})`);
+  }
+  await notion(`/blocks/${row.id}/children`, "PATCH", {
+    children: [
+      {
+        type: "bulleted_list_item",
+        bulleted_list_item: { rich_text: [{ type: "text", text: { content: line } }] },
+      },
+    ],
+  });
+  const totals = await recomputeNutritionDay(row.id, date);
+  if (typeof args.notes === "string" && args.notes.trim()) {
+    await notion(`/pages/${row.id}`, "PATCH", {
+      properties: { Notes: { rich_text: [{ text: { content: args.notes.trim() } }] } },
+    });
+  }
+  console.log(`Logged: ${line}`);
+  console.log(summarizeTotals(date, totals));
+}
+
+/** One-line summary of a day's totals, for the coach to relay. */
+function summarizeTotals(date, totals) {
+  const parts = [`${totals.kcal ?? 0} kcal`];
+  if (totals.protein != null) parts.push(`${totals.protein}g P`);
+  if (totals.carbs != null) parts.push(`${totals.carbs}g C`);
+  if (totals.fat != null) parts.push(`${totals.fat}g F`);
+  return `${date} total: ${parts.join(" · ")} over ${totals.meals} meal${totals.meals === 1 ? "" : "s"}`;
+}
+
+/**
+ * Re-derive a day's totals without adding anything: the correction path after
+ * editing or deleting a meal line by hand in Notion.
+ */
+async function cmdRecomputeNutrition(args) {
+  const date = requireIsoDate(args.date);
+  const dbId = await resolveDbId("Nutrition Log");
+  const row = await findNutritionRow(dbId, date);
+  if (!row) {
+    console.log(`No Nutrition Log row for ${date}; nothing to recompute.`);
+    return;
+  }
+  const totals = await recomputeNutritionDay(row.id, date);
+  console.log(summarizeTotals(date, totals));
+}
+
+/** Record the daily intake targets the Dashboard tile compares against. */
+async function cmdSetNutritionTarget(args) {
+  const num = (v, flag) => {
+    if (v === undefined || v === true) return undefined;
+    const n = Number(v);
+    if (!Number.isFinite(n) || n <= 0) throw new Error(`${flag} must be a positive number.`);
+    return n;
+  };
+  const next = {
+    kcal: num(args.kcal, "--kcal"),
+    protein: num(args.protein, "--protein"),
+    carbs: num(args.carbs, "--carbs"),
+    fat: num(args.fat, "--fat"),
+  };
+  if (Object.values(next).every((v) => v === undefined)) {
+    throw new Error("Pass at least one of --kcal, --protein, --carbs, --fat.");
+  }
+  // Merge, so setting protein alone does not wipe an existing calorie target.
+  const current = readTargets() ?? {};
+  const targets = {
+    kcal: next.kcal ?? current.kcal ?? null,
+    protein: next.protein ?? current.protein ?? null,
+    carbs: next.carbs ?? current.carbs ?? null,
+    fat: next.fat ?? current.fat ?? null,
+    updated: isoDate(new Date()),
+  };
+  writeTargets(targets);
+  console.log(
+    `Targets: ${targets.kcal ?? "-"} kcal · ${targets.protein ?? "-"}g P · ${targets.carbs ?? "-"}g C · ${targets.fat ?? "-"}g F`,
+  );
+  console.log(`Saved to ${path.relative(process.cwd(), TARGETS_FILE)}`);
 }
 
 /**
@@ -1305,6 +1683,9 @@ const COMMANDS = {
   "create-page": cmdCreatePage,
   "upsert-recovery": cmdUpsertRecovery,
   "sync-oura-workouts": cmdSyncOuraWorkouts,
+  "log-meal": cmdLogMeal,
+  "recompute-nutrition": cmdRecomputeNutrition,
+  "set-nutrition-target": cmdSetNutritionTarget,
 };
 
 async function main() {
@@ -1344,6 +1725,11 @@ export {
   renderGoalsTile,
   renderBodyStatsTile,
   renderRecoveryTile,
+  renderNutritionTile,
+  formatMealLine,
+  parseMealLine,
+  nutritionTotals,
+  nutritionProperties,
   recoveryProperties,
   planWorkoutSync,
   ouraWorkoutProperties,

@@ -42,6 +42,8 @@ List your current goals in priority order. Be concrete and time-bound where you 
 - Foods I dislike or want to avoid:
 - Rough daily routine and how I like to eat:
 - Any nutrition target I am working to (calories, protein, etc.):
+  (the coach mirrors this into data/nutrition-targets.json, which is what the
+  Dashboard compares your logged intake against)
 
 ## Style
 

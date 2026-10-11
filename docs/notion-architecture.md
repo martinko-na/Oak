@@ -1,8 +1,8 @@
 # Notion workspace architecture
 
 The coaching workspace lives under one root Notion page (the **Hub**, set via
-`NOTION_PARENT_PAGE_ID`). Four databases and two pages (a Dashboard and a
-Knowledge Base) hang directly off it. The whole thing is built deterministically
+`NOTION_PARENT_PAGE_ID`). Five databases (six with Oura) and two pages (a
+Dashboard and a Knowledge Base) hang directly off it. The whole thing is built deterministically
 by `scripts/setup-workspace.mjs` and maintained through `scripts/notion.mjs`.
 
 Instance-specific ids (Hub, each database, the Dashboard page, and its column
@@ -18,10 +18,11 @@ Relations force the order: a database referenced by a relation must exist first.
 2. **Goals**
 3. **Body Stats**
 4. **Workout Log** (has a `Program` relation to Programs)
-5. an initial Programs row (only if Programs is empty)
+5. **Nutrition Log**
 6. **Recovery** (only when Oura is enabled: `OURA_CLIENT_ID` set, or `--with-oura`)
-7. **Dashboard** page
+7. an initial Programs row (only if Programs is empty)
 8. **Knowledge Base** page (where dumped training programs are filed as subpages)
+9. **Dashboard** page
 
 Run it with: `node scripts/setup-workspace.mjs` (idempotent: existing
 databases/pages are detected by title and reused, never duplicated). Add
@@ -73,12 +74,31 @@ Oura), Calories (number), Distance (km) (number), Avg HR (bpm) (number), Max HR
 Z2 (min) (number), Z4-5 (min) (number), Oura ID (rich_text). These are
 added in place to an existing Workout Log.
 
+**Nutrition Log** (one row per day, upserted by Date): Day (title), Date (date),
+Calories, Protein (g), Carbs (g), Fat (g), Meals (numbers), Notes (rich_text).
+The properties are **always re-derived** from the meal lines in the page body by
+`notion.mjs log-meal | recompute-nutrition`, never incremented and never typed by
+the model, so the row is by construction the sum of what is on the page. One meal
+per line, in the format `log-meal` writes:
+
+```
+08:15 Oats + whey | 520 kcal · 42g P · 58g C · 12g F
+```
+
+A line that does not parse is ignored, so free-text notes can live on the page.
+A macro nobody logged stays empty rather than reading as 0. Daily intake targets
+are **not** in Notion: they live in `data/nutrition-targets.json`
+(`set-nutrition-target`), so the Dashboard compares against a number read from
+disk. `PERSONAL.md` keeps the human-readable copy.
+
 **Recovery** (Oura only, one row per day, upserted by Date): Day (title), Date
 (date), Readiness, Sleep Score, Total Sleep (h), Avg HRV (ms), Lowest HR (bpm),
-Temp Dev (°C), Activity Score, Steps (numbers), Flags (multi_select: Temp
-elevated, Low readiness, Low HRV, Short sleep x2), Coach Takeaway (rich_text).
-Written only by `oura.mjs day | notion.mjs upsert-recovery`, so values are
-exactly Oura's. Workout Log enrichment goes through
+Temp Dev (°C), Activity Score, Steps, Total Calories (kcal) (numbers), Flags
+(multi_select: Temp elevated, Low readiness, Low HRV, Short sleep x2), Coach
+Takeaway (rich_text). Written only by `oura.mjs day | notion.mjs
+upsert-recovery`, so values are exactly Oura's. Total Calories is Oura's
+whole-day expenditure, used for net energy balance against the Nutrition Log; it
+is only complete once the day is over. Workout Log enrichment goes through
 `oura.mjs workouts | notion.mjs sync-oura-workouts`.
 
 ## Dashboard
@@ -90,9 +110,17 @@ A page (not a database), three rows of column layouts:
 - Row 2: 2 columns (Next Session, Active Program + Coach Note)
 - Row 3: 2 columns (Nutrition, Quick Commands)
 
-The Row 1 column ids are captured into `data/notion-ids.json` under
-`__dashboard.columns` (`thisWeek`, `goals`, `bodyStats`, and `recovery` with
-Oura). `sync-dashboard` refreshes the Recovery tile from the latest Recovery row.
+Every tile column id is captured into `data/notion-ids.json` under
+`__dashboard.columns` (`thisWeek`, `goals`, `bodyStats`, `recovery` with Oura,
+`nextSession`, `activeProgram`, `nutrition`, `quickCommands`). `sync-dashboard`
+derives This Week, Goals, Body Stats, Nutrition and Recovery from the databases;
+only Next Session and Active Program are prose the coach maintains.
+
+The Nutrition tile shows today's intake against the stored targets, plus
+**yesterday's** net energy balance (intake minus Oura's day total) when both
+halves exist. Today's balance is deliberately not shown: Oura's expenditure for
+the current day is still accumulating, so it would read as a larger surplus than
+it is.
 
 ### Updating tiles
 

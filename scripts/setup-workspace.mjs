@@ -7,9 +7,11 @@
  *   2. Goals DB
  *   3. Body Stats DB
  *   4. Workout Log DB   (has a relation to Programs, so Programs must exist first)
- *   5. an initial Programs row (only if Programs is empty)
+ *   5. Nutrition Log DB (one aggregate row per day; meals live in the page body)
  *   6. Recovery DB       (only with Oura enabled: one aggregate row per day)
- *   7. Dashboard page    (3 rows of column layouts)
+ *   7. an initial Programs row (only if Programs is empty)
+ *   8. Knowledge Base page (built before the Dashboard, which links to it)
+ *   9. Dashboard page    (3 rows of column layouts)
  *
  * Idempotent: existing databases/pages under the Hub are detected by title and
  * reused, never duplicated. All resolved ids (databases, hub, dashboard page,
@@ -26,9 +28,10 @@
  *   node scripts/setup-workspace.mjs --with-oura     # force the Oura pieces on
  *
  * Oura pieces (Recovery DB, Workout Log Source/Calories/Distance/HR/zones/Oura ID, the
- * Recovery Dashboard tile) are added when OURA_CLIENT_ID is set or --with-oura
- * is passed. Missing Workout Log columns are added to an existing database in
- * place; an existing Dashboard only gains the Recovery tile on
+ * Recovery Dashboard tile, Recovery Total Calories) are added when OURA_CLIENT_ID
+ * is set or --with-oura is passed. Missing Workout Log and Recovery columns are
+ * added to an existing database in place; an existing Dashboard only gains the
+ * Recovery tile, and the Nutrition Log link in its index row, on
  * --rebuild-dashboard.
  */
 import fs from "node:fs";
@@ -303,6 +306,25 @@ async function main() {
     existing,
   );
 
+  // 5. Nutrition Log: one row per day, upserted by Date. The properties hold the
+  //    day's totals, always re-derived by notion.mjs from the meal lines in the
+  //    page body, so nothing here is ever a hand-typed number.
+  cache["Nutrition Log"] = await ensureDatabase(
+    "Nutrition Log",
+    {
+      Day: { title: {} },
+      Date: { date: {} },
+      Calories: { number: {} },
+      "Protein (g)": { number: {} },
+      "Carbs (g)": { number: {} },
+      "Fat (g)": { number: {} },
+      Meals: { number: {} },
+      Notes: { rich_text: {} },
+    },
+    existing,
+  );
+
+  // 6. Oura pieces: Workout Log enrichment columns and the Recovery database.
   if (WITH_OURA) {
     // Oura enrichment columns; added in place to a Workout Log that predates Oura.
     await ensureProperties(cache["Workout Log"], "Workout Log", {
@@ -331,15 +353,22 @@ async function main() {
         "Temp Dev (°C)": { number: {} },
         "Activity Score": { number: {} },
         Steps: { number: {} },
+        // Oura's whole-day expenditure, for net balance against the Nutrition Log.
+        "Total Calories (kcal)": { number: {} },
         // Labels match FLAG_LABELS in scripts/oura.mjs.
         Flags: multi("Temp elevated", "Low readiness", "Low HRV", "Short sleep x2"),
         "Coach Takeaway": { rich_text: {} },
       },
       existing,
     );
+
+    // Added in place to a Recovery database built before net balance existed.
+    await ensureProperties(cache.Recovery, "Recovery", {
+      "Total Calories (kcal)": { number: {} },
+    });
   }
 
-  // 5. Initial program row, only if Programs is empty.
+  // 7. Initial program row, only if Programs is empty.
   const progRows = await api(`databases/${programs}/query`, "POST", { page_size: 1 });
   if (!progRows.results?.length) {
     await api("pages", "POST", {
@@ -355,11 +384,11 @@ async function main() {
     console.log("= Programs already has rows");
   }
 
-  // 6. Knowledge Base page: where dumped training programs are organised.
+  // 8. Knowledge Base page: where dumped training programs are organised.
   //    Built before the Dashboard so the Dashboard can link to it.
   await ensureKnowledgeBase();
 
-  // 7. Dashboard page (links to everything above).
+  // 9. Dashboard page (links to everything above).
   await ensureDashboard();
 
   writeCache(cache);
@@ -399,6 +428,8 @@ async function buildDashboardBody(pageId) {
     link("Body Stats", cache["Body Stats"]),
     sep(),
     link("Workout Log", cache["Workout Log"]),
+    sep(),
+    link("Nutrition Log", cache["Nutrition Log"]),
   ];
   if (cache.Recovery) indexLinks.push(sep(), link("Recovery", cache.Recovery));
   if (cache.__knowledgeBase) indexLinks.push(sep(), link("Knowledge Base", cache.__knowledgeBase));

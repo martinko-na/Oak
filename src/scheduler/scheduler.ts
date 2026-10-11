@@ -87,6 +87,16 @@ function defaultTasks(): ScheduledTask[] {
         ]
       : []),
     {
+      id: "nutrition-nudge",
+      name: "Evening nutrition check",
+      cron: "0 21 * * *",
+      prompt:
+        "Evening check-in. Read today's Nutrition Log row in Notion. If nothing is logged, or intake is well short of my targets, ask me what I ate today and log it with the nutrition-advice skill. If I am on track, say so in one line and leave it there.",
+      chatId: config.ownerChatId,
+      enabled: true,
+      modelTier: "standard",
+    },
+    {
       id: "weekly-plan",
       name: "Sunday weekly plan",
       cron: "0 18 * * 0",

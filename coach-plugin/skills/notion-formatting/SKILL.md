@@ -70,13 +70,13 @@ Note: Notion's public API cannot create or configure database *views* (grouping,
 
 If the workspace has a Dashboard page (built by setup-notion), keep its tiles current after you change the underlying data, so the user never has to ask.
 
-**Preferred for the three data tiles (This Week, Goals, Body Stats):** run one command.
+**Preferred for the data tiles (This Week, Goals, Body Stats, Nutrition, and Recovery with Oura):** run one command.
 
 ```bash
 node scripts/notion.mjs sync-dashboard --now 2026-06-30   # --now is the date from the Telegram header
 ```
 
-`sync-dashboard` re-derives all three tiles directly from the databases (session counts, goal progress, latest body stats), so the numbers are always consistent with the data and never hand-typed. Run it after logging a session, changing a goal, or logging body stats.
+`sync-dashboard` re-derives those tiles directly from the databases (session counts, goal progress, latest body stats, today's intake against the stored targets, latest Oura day), so the numbers are always consistent with the data and never hand-typed. Run it after logging a session, logging a meal, changing a goal, setting a nutrition target, or logging body stats.
 
 For one-off or prose tiles, `refresh-tile` replaces a single tile from your own markdown (never edit blocks in place; their ids shift). Tile ids are cached in `data/notion-ids.json` and self-heal from the live page, so refer to tiles by name: `thisWeek`, `goals`, `bodyStats`, `nextSession`, `activeProgram`, `nutrition`, `quickCommands`.
 
@@ -84,13 +84,13 @@ For one-off or prose tiles, `refresh-tile` replaces a single tile from your own 
 node scripts/notion.mjs refresh-tile --tile goals --md "> [🎯] **Goals**\n- Squat 100kg by Sept"
 ```
 
-Treat the prose tiles (Next Session, Active Program, Nutrition) as yours to keep current, proactively: after recommending or planning a session, refresh Next Session; after agreeing nutrition targets, refresh Nutrition; after a program or focus change, refresh Active Program. If you notice any tile is stale against what you already know, fix it in the same turn rather than leaving it for the user to spot.
+Treat the prose tiles (Next Session, Active Program) as yours to keep current, proactively: after recommending or planning a session, refresh Next Session; after a program or focus change, refresh Active Program. Do not hand-write the Nutrition tile: it is derived by `sync-dashboard` from the Nutrition Log and `data/nutrition-targets.json`. If you notice any tile is stale against what you already know, fix it in the same turn rather than leaving it for the user to spot.
 
 Rebuild the whole Dashboard (`node scripts/setup-workspace.mjs --rebuild-dashboard`) when the program changes, the week advances, or more than three tiles need updating at once. If no Dashboard exists, do not invent one unprompted; offer to build it via setup-notion.
 
 ## Always
 
 - Never use em dashes in anything you write to Notion (titles, prose, table cells, notes). Use commas, parentheses, or full stops instead. This applies to Notion content exactly as it does to chat replies, and unlike Telegram messages it is not stripped automatically, so it is on you to follow it.
-- Match the database schemas in `docs/notion-architecture.md` (Programs, Goals, Body Stats, Workout Log). Put structured values in properties; use the page body for prose and detail.
+- Match the database schemas in `docs/notion-architecture.md` (Programs, Goals, Body Stats, Workout Log, Nutrition Log). Put structured values in properties; use the page body for prose and detail.
 - Keep it phone-friendly to read back, but Notion is the durable record, so it can be a bit richer than a Telegram message.
 - After writing, give the user a short confirmation in chat, not the full Notion content.

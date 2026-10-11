@@ -30,7 +30,7 @@ on top of a plan you already have.
 - Ask "what should I train today?" and get a session based on your goals and recent training.
 - Get a weekly plan and progress reports written back to Notion as clean, structured pages.
 - Look up real exercises (muscles, equipment, demo images) from a free database.
-- Nutrition and macro guidance tied to your goals.
+- Nutrition and macro guidance tied to your goals, with meals logged to Notion so calories and protein build into a trend rather than vanishing into the chat.
 - Proactive reminders (morning nudge, Sunday plan, plus any custom reminder you ask for), and
   optionally put planned sessions on your **Google Calendar** with native phone reminders. See
   [docs/google-calendar-architecture.md](./docs/google-calendar-architecture.md).
@@ -39,8 +39,8 @@ on top of a plan you already have.
   per day saved to Notion.
 
 **Notion is the agent's knowledge base.** The agent creates the Notion databases for you
-(Programs, Goals, Body Stats, Workout Log) plus a Dashboard and Knowledge Base page, fills them
-with the relevant values as you train, and keeps them up to date, including a live Dashboard that
+(Programs, Goals, Body Stats, Workout Log, Nutrition Log) plus a Dashboard and Knowledge
+Base page, fills them with the relevant values as you train, and keeps them up to date, including a live Dashboard that
 always reflects your current program, week, goals, latest stats, and next session. Your training
 history, programs, goals, and body stats live in this workspace the agent builds and maintains,
 and it reads from there before it advises. You can also dump training programs and reference material into the `knowledge/`
