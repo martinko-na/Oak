@@ -19,6 +19,8 @@ import {
   renderRecoveryTile,
   renderThisWeekTile,
   startOfWeekUTC,
+  summarizeWeek,
+  targetProgress,
   validateValue,
 } from "./notion.mjs";
 
@@ -562,4 +564,81 @@ test("renderNutritionTile: yesterday's net balance is signed, and only shown wit
 test("renderNutritionTile: a day with a single meal is not pluralised", () => {
   const md = renderNutritionTile({ date: "2026-10-11", kcal: 520, meals: 1 }, null, null);
   assert.match(md, /1 meal$/m);
+});
+
+// ─── nutrition progress vs targets ────────────────────────────────────────────
+
+test("targetProgress: reports what is left and what is over", () => {
+  assert.equal(
+    targetProgress({ kcal: 1450, protein: 110 }, { kcal: 2200, protein: 180 }),
+    "Vs target: 1450 / 2200 kcal (750 left) · 110 / 180g protein (70 left)",
+  );
+  assert.equal(
+    targetProgress({ kcal: 2400, protein: 190 }, { kcal: 2200, protein: 180 }),
+    "Vs target: 2400 / 2200 kcal (200 over) · 190 / 180g protein (10 over)",
+  );
+});
+
+test("targetProgress: nothing logged counts as zero kcal, unrecorded protein is not zero", () => {
+  assert.equal(
+    targetProgress(null, { kcal: 2200, protein: 180 }),
+    "Vs target: 0 / 2200 kcal (2200 left) · protein not recorded (target 180g)",
+  );
+});
+
+test("targetProgress: no targets means no line", () => {
+  assert.equal(targetProgress({ kcal: 900 }, null), null);
+  assert.equal(targetProgress({ kcal: 900 }, { kcal: null, protein: null }), null);
+});
+
+// ─── weekly review ────────────────────────────────────────────────────────────
+
+const WEEK = { start: "2026-10-19", end: "2026-10-25" };
+
+test("summarizeWeek: averages only over days with data and says how many", () => {
+  const lines = summarizeWeek({
+    ...WEEK,
+    sessions: [
+      { date: "2026-10-20", name: "Upper A" },
+      { date: "2026-10-23", name: "Lower A" },
+    ],
+    recovery: [
+      { readiness: 80, sleepHours: 7.5, hrv: 50, flags: "" },
+      { readiness: 60, sleepHours: 5.5, hrv: 40, flags: "Short sleep" },
+      { readiness: "", sleepHours: "", hrv: "", flags: "" },
+    ],
+    nutrition: [
+      { kcal: 2000, protein: 170 },
+      { kcal: 2400, protein: 190 },
+      { kcal: "", protein: "" },
+    ],
+    body: [
+      { date: "2026-10-19", bodyweight: 82.4 },
+      { date: "2026-10-25", bodyweight: 81.9 },
+    ],
+    targets: { kcal: 2200, protein: 180 },
+  });
+  assert.deepEqual(lines, [
+    "Week 2026-10-19 to 2026-10-25",
+    "Training: 2 sessions (2026-10-20 Upper A; 2026-10-23 Lower A)",
+    "Recovery (avg over 2 days): readiness 70, sleep 6.5h, HRV 45ms; 1 flagged day",
+    "Nutrition: 2 of 7 days logged, avg 2200 kcal, avg 180g protein, protein target (180g) hit on 1, kcal target 2200",
+    "Bodyweight: 82.4kg to 81.9kg (-0.5kg, 2 weigh-ins)",
+  ]);
+});
+
+test("summarizeWeek: empty week, and no Oura or Nutrition databases", () => {
+  const lines = summarizeWeek({
+    ...WEEK,
+    sessions: [],
+    recovery: null,
+    nutrition: null,
+    body: [],
+    targets: null,
+  });
+  assert.deepEqual(lines, [
+    "Week 2026-10-19 to 2026-10-25",
+    "Training: no sessions logged.",
+    "Bodyweight: no weigh-ins.",
+  ]);
 });

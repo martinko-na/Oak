@@ -4,6 +4,7 @@ import { type ModelTier, runAgent } from "../agent/runner.js";
 import { sendMessage } from "../channel/notify.js";
 import { config } from "../config.js";
 import { writeJsonAtomic } from "../util/atomicfile.js";
+import { ouraReady } from "./oura-gate.js";
 
 /**
  * Cron-based scheduler for proactive coaching: morning session nudges, the weekly
@@ -15,6 +16,11 @@ import { writeJsonAtomic } from "../util/atomicfile.js";
  *
  * A task with `runAt` (ISO datetime) instead of a cron expression is a one-shot: it
  * fires once and is then removed. The silent hourly Oura sync retries use these.
+ *
+ * Oura gate: when Oura is configured and the scheduler runs in-process (polling
+ * mode), the morning nudge first asks scripts/oura.mjs whether last night has
+ * synced. If not, the agent is not woken at all: a one-shot retry carrying the same
+ * prompt is queued an hour out, until the lunch recap takes over at 12:30.
  * One-shots survive a restart: a past-due one fires on load unless it is more than
  * ONE_SHOT_STALE_MS late, in which case it is dropped (a retry for a morning that
  * has long passed is noise, not help).
@@ -42,6 +48,57 @@ export const ONE_SHOT_STALE_MS = 2 * 60 * 60 * 1000;
  * yet). An empty reply still sends "(no output)" so a broken run stays visible.
  */
 export const NO_MESSAGE = "NO_MESSAGE";
+
+const MORNING_NUDGE_ID = "morning-nudge";
+const OURA_RETRY_PREFIX = "oura-retry-";
+/** Local time (minutes after midnight) by which a retry must fire: the lunch recap. */
+const OURA_RETRY_CUTOFF_MIN = 12 * 60 + 30;
+const OURA_RETRY_INTERVAL_MIN = 60;
+
+/** The local calendar date and minutes after midnight of `now` in `timezone`. */
+export function localClock(now: Date, timezone: string): { date: string; minutes: number } {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    })
+      .formatToParts(now)
+      .map((p) => [p.type, p.value]),
+  );
+  return {
+    date: `${parts.year}-${parts.month}-${parts.day}`,
+    minutes: Number(parts.hour) * 60 + Number(parts.minute),
+  };
+}
+
+/**
+ * The next silent Oura retry after `now`, or null once it would land at or after
+ * the lunch cutoff (the lunch recap is the fallback from there).
+ */
+export function nextOuraRetry(
+  now: Date,
+  timezone: string,
+): { at: Date; date: string; hour: string } | null {
+  const at = new Date(now.getTime() + OURA_RETRY_INTERVAL_MIN * 60_000);
+  const local = localClock(at, timezone);
+  const today = localClock(now, timezone).date;
+  if (local.date !== today || local.minutes >= OURA_RETRY_CUTOFF_MIN) return null;
+  return { at, date: today, hour: String(Math.floor(local.minutes / 60)).padStart(2, "0") };
+}
+
+/** The morning nudge and its retries wait for Oura; webhook mode cannot retry. */
+function isOuraGated(task: ScheduledTask): boolean {
+  return (
+    Boolean(config.ouraClientId) &&
+    config.mode === "polling" &&
+    (task.id === MORNING_NUDGE_ID || task.id.startsWith(OURA_RETRY_PREFIX))
+  );
+}
 
 /**
  * What to do with a one-shot task at `now`: schedule it for later, fire it right
@@ -97,7 +154,7 @@ function defaultTasks(): ScheduledTask[] {
       name: "Evening nutrition check",
       cron: "0 21 * * *",
       prompt:
-        "Evening check-in. Read today's Nutrition Log row in Notion. If nothing is logged, or intake is well short of my targets, ask me what I ate today and log it with the nutrition-advice skill. If I am on track, say so in one line and leave it there.",
+        "Evening check-in. Run `node scripts/notion.mjs nutrition-status` for today. If nothing is logged, or intake is well short of my targets, ask me what I ate today and log it with the nutrition-advice skill. If I am on track, say so in one line and leave it there.",
       chatId: config.ownerChatId,
       enabled: true,
       modelTier: "standard",
@@ -107,7 +164,7 @@ function defaultTasks(): ScheduledTask[] {
       name: "Sunday weekly plan",
       cron: "0 18 * * 0",
       prompt:
-        "It is the start of a new week. Build my training plan for the coming week from my goals and recent training volume, then save it to Notion and summarise it for me here.",
+        "It is the start of a new week. Use the weekly-plan skill: review the week just ended (three short lines and one focus), then build my training plan for the coming week from my goals and recent training volume, save both to Notion, and summarise them for me here.",
       chatId: config.ownerChatId,
       enabled: true,
       modelTier: "standard",
@@ -150,9 +207,16 @@ export function getTask(id: string): ScheduledTask | undefined {
 }
 
 /** Run a task now: invoke the agent with its prompt and push the result. */
-export async function executeTask(task: ScheduledTask): Promise<void> {
+export async function executeTask(task: ScheduledTask, now: Date = new Date()): Promise<void> {
   console.log(`[scheduler] Running: ${task.name}`);
   try {
+    if (isOuraGated(task)) {
+      const { date } = localClock(now, config.timezone);
+      if ((await ouraReady(date)) === false) {
+        queueOuraRetry(task, now);
+        return;
+      }
+    }
     const response = await runAgent({
       userMessage: task.prompt,
       chatId: task.chatId,
@@ -170,6 +234,23 @@ export async function executeTask(task: ScheduledTask): Promise<void> {
       () => {},
     );
   }
+}
+
+/** Queue the next silent retry of an Oura-gated task, if it is not past the cutoff. */
+function queueOuraRetry(task: ScheduledTask, now: Date): void {
+  const next = nextOuraRetry(now, config.timezone);
+  if (!next) {
+    console.log(`[scheduler] ${task.name}: Oura not synced, leaving it to the lunch recap`);
+    return;
+  }
+  console.log(`[scheduler] ${task.name}: Oura not synced, retrying at ${next.hour}:xx`);
+  addTask({
+    ...task,
+    id: `${OURA_RETRY_PREFIX}${next.date}-${next.hour}`,
+    name: `Oura sync retry (${next.hour}:xx)`,
+    cron: "",
+    runAt: next.at.toISOString(),
+  });
 }
 
 export function addTask(task: ScheduledTask): void {

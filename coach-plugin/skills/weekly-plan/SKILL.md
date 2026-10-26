@@ -1,6 +1,6 @@
 ---
 name: weekly-plan
-description: Build or refresh the user's training plan for the week and save it to Notion. Use when the user asks for a weekly plan, to plan their week, to set up their training split, or on the scheduled Sunday planning run.
+description: Review the week just ended, then build or refresh the user's training plan for the coming week and save both to Notion. Use when the user asks for a weekly plan, to plan their week, to set up their training split, or on the scheduled Sunday planning run.
 ---
 
 # Build the week's training plan
@@ -14,6 +14,13 @@ Produce a realistic plan for the coming week that moves the user toward their go
 - If Google Calendar is configured (calendar-sync skill), list the target week's events with `node scripts/calendar.mjs list --from <monday> --to <sunday>` and treat them as hard constraints when picking session days and times.
 - When you read an existing program or week page, disambiguate by context, not just by name. Pages often share a name like "Week 1". Check the parent page title to confirm you have the right program (gym versus calisthenics, for example). If still ambiguous, ask which one in a single short question rather than guessing.
 
+## 1b. Review the week just ended (Sunday run, or when asked to plan the next week)
+
+- Run `node scripts/notion.mjs week-review --end <today>` (date from the Telegram header). It prints the week's numbers computed in code: sessions, recovery averages, nutrition days logged and averages against targets, and bodyweight change. Quote these numbers; never compute or estimate your own.
+- Skim the logged sessions' page bodies (`get-page-blocks`) for any personal record or a lift that stalled.
+- Turn it into a review of **three short lines** (training, recovery, nutrition and bodyweight) plus **one focus for next week**: the single change most likely to move their main goal. If the honest finding is "only 2 of 7 days of food logged", that is the line, not the averages.
+- Let the review shape the plan: a week of poor recovery argues for a lighter start, missed sessions argue for fewer, more realistic ones.
+
 ## 2. Design the plan
 
 - Match the number of sessions to the days the user can actually train. Do not over-program.
@@ -26,4 +33,5 @@ Produce a realistic plan for the coming week that moves the user toward their go
 
 - Write the plan to Notion as a page (or a set of planned entries) under the training workspace, dated for the week, so it persists and the recommend-workout skill can reference it. Follow the notion-formatting skill so the page is clean and structured (a callout for the week's priority, a table of the days). If the workspace does not exist, run setup-notion first.
 - If Google Calendar is configured, create one calendar event per planned session in the same turn (calendar-sync skill): focus in the title, key lifts in the description, default 30-minute popup reminder. This is what puts the plan on the user's phone without Telegram.
-- Present a concise summary in chat: day by day, the focus and the key lifts or sessions. Keep it scannable on a phone, and add one line of motivation tied to the user's main goal.
+- Put the review at the top of the week's plan page (a callout with the three lines and the focus), so past weeks' reviews stay in Notion.
+- In chat, lead with the review (three lines plus the focus), then a concise plan summary: day by day, the focus and the key lifts or sessions. Keep it scannable on a phone, and add one line of motivation tied to the user's main goal.

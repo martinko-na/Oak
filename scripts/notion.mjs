@@ -1468,6 +1468,8 @@ async function cmdLogMeal(args) {
   }
   console.log(`Logged: ${line}`);
   console.log(summarizeTotals(date, totals));
+  const progress = targetProgress(totals, readTargets());
+  if (progress) console.log(progress);
 }
 
 /** One-line summary of a day's totals, for the coach to relay. */
@@ -1477,6 +1479,212 @@ function summarizeTotals(date, totals) {
   if (totals.carbs != null) parts.push(`${totals.carbs}g C`);
   if (totals.fat != null) parts.push(`${totals.fat}g F`);
   return `${date} total: ${parts.join(" · ")} over ${totals.meals} meal${totals.meals === 1 ? "" : "s"}`;
+}
+
+/**
+ * Where a day stands against the stored targets, e.g.
+ * "Vs target: 1450 / 2200 kcal (750 left) · 110 / 180g protein (70 left)".
+ * Computed here so the coach relays "what's left" without doing arithmetic.
+ * Null when no target is set or nothing comparable is logged.
+ */
+function targetProgress(totals, targets) {
+  const has = (v) => v != null && v !== "";
+  const left = (got, want) =>
+    got <= want ? `${round1(want - got)} left` : `${round1(got - want)} over`;
+  const parts = [];
+  if (has(targets?.kcal)) {
+    const got = has(totals?.kcal) ? Number(totals.kcal) : 0;
+    parts.push(`${got} / ${Number(targets.kcal)} kcal (${left(got, Number(targets.kcal))})`);
+  }
+  if (has(targets?.protein) && has(totals?.protein)) {
+    const got = Number(totals.protein);
+    parts.push(
+      `${got} / ${Number(targets.protein)}g protein (${left(got, Number(targets.protein))})`,
+    );
+  } else if (has(targets?.protein)) {
+    parts.push(`protein not recorded (target ${Number(targets.protein)}g)`);
+  }
+  return parts.length ? `Vs target: ${parts.join(" · ")}` : null;
+}
+
+/**
+ * Today's intake so far against the targets, for the lunch and evening
+ * check-ins: one call instead of reading the row and the targets separately.
+ */
+async function cmdNutritionStatus(args) {
+  const date = requireIsoDate(args.date);
+  const dbId = await resolveDbId("Nutrition Log");
+  const row = await findNutritionRow(dbId, date);
+  let totals = null;
+  if (!row) {
+    console.log(`${date}: nothing logged yet.`);
+  } else {
+    const p = row.properties ?? {};
+    const num = (v) => (v === "" || v == null ? null : Number(v));
+    totals = {
+      kcal: num(readProp(p.Calories)),
+      protein: num(readProp(p["Protein (g)"])),
+      carbs: num(readProp(p["Carbs (g)"])),
+      fat: num(readProp(p["Fat (g)"])),
+      meals: num(readProp(p.Meals)) ?? 0,
+    };
+    console.log(summarizeTotals(date, totals));
+  }
+  console.log(targetProgress(totals, readTargets()) ?? "No nutrition targets set.");
+}
+
+// ─── Weekly review ───────────────────────────────────────────────────────────
+
+/**
+ * The numbers for the Sunday review of the 7 days ending `end`, as plain lines.
+ * Pure over already-extracted rows so it is testable. Averages only cover days
+ * that have data, and say how many that was: an unlogged day is never a zero.
+ */
+function summarizeWeek({ start, end, sessions, recovery, nutrition, body, targets }) {
+  const has = (v) => v != null && v !== "";
+  const avg = (rows, key) => {
+    const vals = rows
+      .map((r) => r[key])
+      .filter(has)
+      .map(Number);
+    return vals.length ? round1(vals.reduce((a, b) => a + b, 0) / vals.length) : null;
+  };
+  const lines = [`Week ${start} to ${end}`];
+
+  if (!sessions.length) {
+    lines.push("Training: no sessions logged.");
+  } else {
+    const list = sessions.map((x) => [x.date, x.name].filter(has).join(" ")).join("; ");
+    lines.push(`Training: ${sessions.length} session${sessions.length === 1 ? "" : "s"} (${list})`);
+  }
+
+  if (recovery) {
+    const days = recovery.filter((r) => has(r.readiness) || has(r.sleepHours));
+    if (!days.length) {
+      lines.push("Recovery: no Oura days recorded.");
+    } else {
+      const parts = [];
+      const r = avg(days, "readiness");
+      const sl = avg(days, "sleepHours");
+      const hrv = avg(days, "hrv");
+      if (r != null) parts.push(`readiness ${r}`);
+      if (sl != null) parts.push(`sleep ${sl}h`);
+      if (hrv != null) parts.push(`HRV ${hrv}ms`);
+      const flagged = days.filter((d) => has(d.flags)).length;
+      lines.push(
+        `Recovery (avg over ${days.length} day${days.length === 1 ? "" : "s"}): ${parts.join(", ")}${flagged ? `; ${flagged} flagged day${flagged === 1 ? "" : "s"}` : ""}`,
+      );
+    }
+  }
+
+  if (nutrition) {
+    const days = nutrition.filter((n) => has(n.kcal));
+    if (!days.length) {
+      lines.push("Nutrition: nothing logged.");
+    } else {
+      const parts = [`${days.length} of 7 days logged`, `avg ${avg(days, "kcal")} kcal`];
+      const p = avg(days, "protein");
+      if (p != null) parts.push(`avg ${p}g protein`);
+      if (has(targets?.protein)) {
+        const hit = days.filter(
+          (d) => has(d.protein) && Number(d.protein) >= Number(targets.protein),
+        );
+        parts.push(`protein target (${Number(targets.protein)}g) hit on ${hit.length}`);
+      }
+      if (has(targets?.kcal)) parts.push(`kcal target ${Number(targets.kcal)}`);
+      lines.push(`Nutrition: ${parts.join(", ")}`);
+    }
+  }
+
+  const weighed = body.filter((b) => has(b.bodyweight));
+  if (weighed.length) {
+    const first = weighed[0];
+    const last = weighed[weighed.length - 1];
+    const delta = round1(Number(last.bodyweight) - Number(first.bodyweight));
+    lines.push(
+      weighed.length === 1
+        ? `Bodyweight: ${last.bodyweight}kg (${last.date}), one weigh-in`
+        : `Bodyweight: ${first.bodyweight}kg to ${last.bodyweight}kg (${delta > 0 ? "+" : ""}${delta}kg, ${weighed.length} weigh-ins)`,
+    );
+  } else {
+    lines.push("Bodyweight: no weigh-ins.");
+  }
+  return lines;
+}
+
+/** Pages of a database whose date property falls in [start, end], oldest first. */
+async function queryDateRange(dbName, start, end) {
+  const dbId = await resolveDbId(dbName);
+  const schema = (await notion(`/databases/${dbId}`)).properties ?? {};
+  const dateProp = findProp(schema, (_n, d) => d.type === "date");
+  if (!dateProp) return { schema, dateProp, pages: [] };
+  const res = await notion(`/databases/${dbId}/query`, "POST", {
+    filter: {
+      and: [
+        { property: dateProp, date: { on_or_after: start } },
+        { property: dateProp, date: { on_or_before: end } },
+      ],
+    },
+    sorts: [{ property: dateProp, direction: "ascending" }],
+    page_size: 100,
+  });
+  return { schema, dateProp, pages: res.results ?? [] };
+}
+
+/**
+ * Print the numbers for the weekly review (the 7 days ending --end, default
+ * today). Recovery and Nutrition are skipped when those databases do not exist.
+ */
+async function cmdWeekReview(args) {
+  const end = args.end ? requireIsoDate(args.end, "--end") : isoDate(new Date());
+  const start = isoDate(new Date(Date.parse(`${end}T00:00:00Z`) - 6 * 86_400_000));
+
+  const wl = await queryDateRange("Workout Log", start, end);
+  const titleProp = findProp(wl.schema, (_n, d) => d.type === "title");
+  const sessions = wl.pages.map((pg) => ({
+    date: readProp(pg.properties?.[wl.dateProp]),
+    name: readProp(pg.properties?.[titleProp]),
+  }));
+
+  const optional = async (fn) => {
+    try {
+      return await fn();
+    } catch {
+      return null; // database not in this workspace (e.g. no Oura)
+    }
+  };
+  const recovery = await optional(async () =>
+    (await queryDateRange("Recovery", start, end)).pages.map((pg) => ({
+      readiness: readProp(pg.properties?.Readiness),
+      sleepHours: readProp(pg.properties?.["Total Sleep (h)"]),
+      hrv: readProp(pg.properties?.["Avg HRV (ms)"]),
+      flags: readProp(pg.properties?.Flags),
+    })),
+  );
+  const nutrition = await optional(async () =>
+    (await queryDateRange("Nutrition Log", start, end)).pages.map((pg) => ({
+      kcal: readProp(pg.properties?.Calories),
+      protein: readProp(pg.properties?.["Protein (g)"]),
+    })),
+  );
+  const bs = await queryDateRange("Body Stats", start, end);
+  const bwProp = findProp(bs.schema, (n) => n.includes("bodyweight"));
+  const body = bs.pages.map((pg) => ({
+    date: readProp(pg.properties?.[bs.dateProp]),
+    bodyweight: bwProp ? readProp(pg.properties?.[bwProp]) : "",
+  }));
+
+  for (const line of summarizeWeek({
+    start,
+    end,
+    sessions,
+    recovery,
+    nutrition,
+    body,
+    targets: readTargets(),
+  })) {
+    console.log(line);
+  }
 }
 
 /**
@@ -1686,6 +1894,8 @@ const COMMANDS = {
   "log-meal": cmdLogMeal,
   "recompute-nutrition": cmdRecomputeNutrition,
   "set-nutrition-target": cmdSetNutritionTarget,
+  "nutrition-status": cmdNutritionStatus,
+  "week-review": cmdWeekReview,
 };
 
 async function main() {
@@ -1726,6 +1936,8 @@ export {
   renderBodyStatsTile,
   renderRecoveryTile,
   renderNutritionTile,
+  targetProgress,
+  summarizeWeek,
   formatMealLine,
   parseMealLine,
   nutritionTotals,

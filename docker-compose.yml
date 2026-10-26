@@ -2,7 +2,7 @@
 #
 # This runs in polling mode (the default), so it needs no public URL and the
 # in-process scheduler handles reminders. Just fill in .env first. The named
-# volume keeps sessions and the schedule across restarts.
+# volume keeps sessions, transcripts, caches and the schedule across restarts.
 services:
   fitcoach:
     build: .
@@ -12,6 +12,10 @@ services:
       MODE: polling
       SESSION_FILE: /data/sessions.json
       SCHEDULE_FILE: /data/schedule.json
+      # The Agent SDK keeps conversation transcripts under $HOME/.claude. On the
+      # volume they survive a recreate; in the container layer they would vanish
+      # while sessions.json still points at them.
+      HOME: /data
     volumes:
       - fitcoach-data:/data
     # Optional: expose the health check. Not required for the bot to work.
