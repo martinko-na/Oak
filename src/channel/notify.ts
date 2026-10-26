@@ -1,13 +1,21 @@
-import type { Bot } from "grammy";
+import type { Api, Bot } from "grammy";
 import { redactSecrets } from "../util/redact.js";
-import { toPlainText, toTelegramHtml } from "./format.js";
+import { toPlainText, toRichMarkdown, toTelegramHtml } from "./format.js";
 
 /**
- * Proactive messaging. The scheduler (and any other background task) uses this to
- * push messages to a chat without an incoming update to reply to. Mirrors the
- * inbound reply path: secrets scrubbed, Markdown converted to Telegram HTML, with
- * a plain-text fallback if Telegram rejects the entities.
+ * Outbound messaging, shared by inbound replies and proactive pushes (the
+ * scheduler and any other background task). Secrets are scrubbed first. Each chunk
+ * goes out as a rich message (Bot API 10.1+), which renders the model's Markdown
+ * natively, tables included. If Telegram rejects it, the chunk falls back to the
+ * older HTML path (tables as <pre> blocks), and then to plain text.
  */
+
+/** Rich message text limit, per the Bot API. */
+const RICH_MAX = 32768;
+/** Classic message text limit, used by the HTML and plain-text fallbacks. */
+const TEXT_MAX = 4096;
+
+type SendApi = Pick<Api, "sendRichMessage" | "sendMessage">;
 
 let botRef: Bot | null = null;
 
@@ -20,12 +28,25 @@ export async function sendMessage(chatId: string | number, text: string): Promis
     console.warn("[notify] No bot registered, cannot send message");
     return;
   }
+  await deliver(botRef.api, chatId, text);
+}
+
+/** Send text to a chat: rich message first, then HTML, then plain text. */
+export async function deliver(api: SendApi, chatId: string | number, text: string): Promise<void> {
   const safe = redactSecrets(text);
-  for (const chunk of splitMessage(safe, 4096)) {
+  for (const chunk of splitMessage(safe, RICH_MAX)) {
     try {
-      await botRef.api.sendMessage(chatId, toTelegramHtml(chunk), { parse_mode: "HTML" });
-    } catch {
-      await botRef.api.sendMessage(chatId, toPlainText(chunk));
+      await api.sendRichMessage(chatId, { markdown: toRichMarkdown(chunk) });
+      continue;
+    } catch (err: any) {
+      console.warn(`[notify] Rich message rejected, falling back to HTML: ${err?.message ?? err}`);
+    }
+    for (const part of splitMessage(chunk, TEXT_MAX)) {
+      try {
+        await api.sendMessage(chatId, toTelegramHtml(part), { parse_mode: "HTML" });
+      } catch {
+        await api.sendMessage(chatId, toPlainText(part));
+      }
     }
   }
 }
