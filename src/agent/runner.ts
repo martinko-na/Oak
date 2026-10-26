@@ -152,6 +152,36 @@ function buildSessionContext(): string {
   return parts.join("; ");
 }
 
+/** Cap on how much of PERSONAL.md goes into the system prompt. */
+const PERSONAL_MAX_CHARS = 8000;
+
+/**
+ * PERSONAL.md as a system prompt section, so the user's profile and standing
+ * instructions are in context on every turn, including fresh sessions after the
+ * old one expired. Only for the owner's chat (or every chat when no owner is
+ * set): the file describes one person and must not leak to other allowed users.
+ * Returns "" when it does not apply or the file is missing.
+ */
+function personalSystemPrompt(chatId: string): string {
+  if (config.ownerChatId && chatId !== config.ownerChatId) return "";
+  let text: string;
+  try {
+    text = fs.readFileSync(path.join(PROJECT_ROOT, "PERSONAL.md"), "utf-8").trim();
+  } catch {
+    return "";
+  }
+  if (!text) return "";
+  if (text.length > PERSONAL_MAX_CHARS) text = `${text.slice(0, PERSONAL_MAX_CHARS)}\n[truncated]`;
+  return [
+    "## The user's PERSONAL.md",
+    "",
+    "Loaded from PERSONAL.md on every turn. Always honour it, above all the Standing " +
+      "instructions section. To change it, edit the file; never rely on chat history.",
+    "",
+    text,
+  ].join("\n");
+}
+
 /**
  * Run the Claude agent for one incoming message.
  *
@@ -182,7 +212,9 @@ export async function runAgent(opts: {
   const prompt = `[Telegram chat ${chatId}${userLabel ? ` | ${userLabel}` : ""} | local time: ${now} (${config.timezone})]\n[context: ${context}]\n${userMessage}`;
 
   const persona = pickPersonality(chatId);
-  const personaAppend = personaSystemPrompt(persona);
+  const systemAppend = [personaSystemPrompt(persona), personalSystemPrompt(chatId)]
+    .filter(Boolean)
+    .join("\n\n");
 
   console.log(
     `[agent] Starting query (${model}, ${modelTier}, persona=${persona.id}):`,
@@ -247,7 +279,7 @@ export async function runAgent(opts: {
             type: "preset",
             preset: "claude_code",
             excludeDynamicSections: true,
-            ...(personaAppend ? { append: personaAppend } : {}),
+            ...(systemAppend ? { append: systemAppend } : {}),
           },
           resume: existingSession,
           // Load the project CLAUDE.md (the coach persona) and surface every skill

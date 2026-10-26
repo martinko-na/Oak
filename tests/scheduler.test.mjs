@@ -97,6 +97,15 @@ test("an empty agent response still sends something rather than a blank message"
   assert.equal(sent[0].text, "(no output)");
 });
 
+test("a NO_MESSAGE reply sends nothing to the chat", async () => {
+  const scheduler = await loadScheduler({ agent: () => ({ text: " NO_MESSAGE\n" }) });
+
+  await scheduler.executeTask(task());
+
+  assert.equal(agentCalls.length, 1);
+  assert.deepEqual(sent, []);
+});
+
 test("a failing task is reported to the chat instead of crashing the scheduler", async () => {
   const scheduler = await loadScheduler({
     agent: () => {

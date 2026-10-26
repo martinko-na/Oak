@@ -14,7 +14,7 @@ import { writeJsonAtomic } from "../util/atomicfile.js";
  * in context with the ongoing conversation.
  *
  * A task with `runAt` (ISO datetime) instead of a cron expression is a one-shot: it
- * fires once and is then removed. The Oura sync retries (+10 min, +1 h) use these.
+ * fires once and is then removed. The silent hourly Oura sync retries use these.
  * One-shots survive a restart: a past-due one fires on load unless it is more than
  * ONE_SHOT_STALE_MS late, in which case it is dropped (a retry for a morning that
  * has long passed is noise, not help).
@@ -36,6 +36,12 @@ export interface ScheduledTask {
 const tasks = new Map<string, { task: ScheduledTask; job: Cron }>();
 const SCHEDULE_FILE = config.scheduleFile;
 export const ONE_SHOT_STALE_MS = 2 * 60 * 60 * 1000;
+/**
+ * A task run whose whole reply is this sentinel sends nothing to the chat. Used by
+ * checks that should stay quiet when there is nothing to say (e.g. Oura not synced
+ * yet). An empty reply still sends "(no output)" so a broken run stays visible.
+ */
+export const NO_MESSAGE = "NO_MESSAGE";
 
 /**
  * What to do with a one-shot task at `now`: schedule it for later, fire it right
@@ -143,6 +149,10 @@ export async function executeTask(task: ScheduledTask): Promise<void> {
       userLabel: "scheduled task",
       modelTier: task.modelTier ?? "standard",
     });
+    if (response.text.trim() === NO_MESSAGE) {
+      console.log(`[scheduler] ${task.name}: nothing to send`);
+      return;
+    }
     await sendMessage(task.chatId, response.text || "(no output)");
   } catch (err: any) {
     console.error(`[scheduler] Task ${task.name} failed:`, err.message);
