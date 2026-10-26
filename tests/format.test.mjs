@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { toPlainText, toTelegramHtml } from "../dist/channel/format.js";
+import { toPlainText, toRichMarkdown, toTelegramHtml } from "../dist/channel/format.js";
 
 // ─── toTelegramHtml ───────────────────────────────────────────────────────────
 
@@ -47,6 +47,53 @@ test("keeps en-dash numeric ranges intact", () => {
   assert.equal(toTelegramHtml("do 8–12 reps"), "do 8–12 reps");
 });
 
+const MEALS = [
+  "| Meal | kcal | P |",
+  "|---|---|---|",
+  "| Breakfast | 520 | 35g |",
+  "| **Total** | 1260 | 87g |",
+].join("\n");
+
+const MEALS_RENDERED = [
+  "Meal       kcal    P",
+  "─────────  ────  ───",
+  "Breakfast   520  35g",
+  "Total      1260  87g",
+].join("\n");
+
+test("renders a markdown table as an aligned <pre> block", () => {
+  assert.equal(toTelegramHtml(MEALS), `<pre>${MEALS_RENDERED}</pre>`);
+});
+
+test("keeps prose around a table formatted", () => {
+  assert.equal(
+    toTelegramHtml(`**Today**\n${MEALS}\n- eat more protein`),
+    `<b>Today</b>\n<pre>${MEALS_RENDERED}</pre>\n• eat more protein`,
+  );
+});
+
+test("escapes HTML inside table cells", () => {
+  assert.equal(
+    toTelegramHtml("| a | b |\n|---|---|\n| a<b | x&y |"),
+    "<pre>a    b\n───  ───\na&lt;b  x&amp;y</pre>",
+  );
+});
+
+test("honours explicit column alignment", () => {
+  assert.equal(
+    toTelegramHtml("| name | note |\n|:---|---:|\n| a | long |\n| bb | x |"),
+    "<pre>name  note\n────  ────\na     long\nbb       x</pre>",
+  );
+});
+
+test("leaves tables inside fenced code alone", () => {
+  assert.equal(toTelegramHtml("```\n| a |\n|---|\n```"), "<pre>| a |\n|---|</pre>");
+});
+
+test("a horizontal rule under a pipe line is not a table", () => {
+  assert.equal(toTelegramHtml("a | b\n---"), "a | b\n---");
+});
+
 // ─── toPlainText ──────────────────────────────────────────────────────────────
 
 test("strips bold markers to plain text", () => {
@@ -59,4 +106,21 @@ test("renders links as text with url in parens", () => {
 
 test("strips em dashes in plain text too", () => {
   assert.equal(toPlainText("rest — then push"), "rest, then push");
+});
+
+test("renders tables as aligned columns in plain text", () => {
+  assert.equal(toPlainText(MEALS), MEALS_RENDERED);
+});
+
+// ─── toRichMarkdown ───────────────────────────────────────────────────────────
+
+test("rich markdown keeps tables and markup as written", () => {
+  assert.equal(toRichMarkdown(MEALS), MEALS);
+});
+
+test("rich markdown strips em dashes outside code only", () => {
+  assert.equal(
+    toRichMarkdown("rest — then push\n```\na — b\n```"),
+    "rest, then push\n```\na — b\n```",
+  );
 });

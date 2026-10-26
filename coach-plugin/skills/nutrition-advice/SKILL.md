@@ -51,6 +51,7 @@ node scripts/notion.mjs set-nutrition-target --kcal 2200 --protein 180
 
 - After logging a meal, close the reply with where the day stands, using the `Vs target` line `log-meal` prints ("1450 kcal so far, 750 to go. Protein 110g, 70g left: get a solid portion in at dinner"). Turn what is left into one concrete suggestion. Never compute the remainder yourself.
 - Check-ins (lunch recap, evening check): use `nutrition-status --date <today>` and the same rules. On track: one line. Well short of protein late in the day: name one easy food that closes the gap.
+- When the reply shows numbers for more than one meal or macro (the day so far, a meal breakdown, a meal plan), put them in a Markdown table: Telegram renders it as a real table. Keep it phone-width: at most 5 columns and about 32 characters per row, short headers (`Meal`, `kcal`, `P`, `C`, `F`), plain numbers with no units in the cells, and a `Total` row then a `Target` row when relevant. Copy the values from the command output. A single meal or a one-line check-in stays prose.
 - After any nutrition write, refresh the Dashboard in the same turn:
   `node scripts/notion.mjs sync-dashboard --now <today>`.
 

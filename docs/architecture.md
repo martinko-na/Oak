@@ -20,7 +20,7 @@ runAgent  (src/agent/runner.ts)            ── Claude Agent SDK query()
   │   • tools: Bash, Read/Write/Edit, Glob/Grep, WebFetch/WebSearch, Skill
   │   • Notion via the REST API (scripts/notion.mjs) run through Bash
   ▼
-reply  (src/channel/notify.ts, format.ts)  ── markdown → Telegram HTML, em-dash stripped, secrets redacted
+reply  (src/channel/notify.ts, format.ts)  ── rich message (native Markdown, Bot API 10.1+), HTML fallback, em-dash stripped, secrets redacted
 
 scheduler  (src/scheduler/*)               ── croner fires reminders + the Sunday plan (polling mode)
 ```
@@ -38,7 +38,7 @@ generic while the running agent is personalised to you.
 | `src/index.ts` | Entry point and composition root: wires the bot, scheduler, and HTTP servers. |
 | `src/config.ts` | Central env-driven configuration. |
 | `src/agent/` | The agent loop (`runner.ts`), persona overlays (`personalities.ts`), and per-chat session store (`sessions.ts`). |
-| `src/channel/` | Telegram transport: `notify.ts` (send), `format.ts` (markdown→HTML, em-dash strip), `webhook-server.ts`, `permissions.ts` (allowlist). |
+| `src/channel/` | Telegram transport: `notify.ts` (`deliver`: rich message, then HTML, then plain text), `format.ts` (rich-markdown prep, markdown→HTML with `<pre>` tables, em-dash strip), `webhook-server.ts`, `permissions.ts` (allowlist). |
 | `src/media/` | Inbound media: `attachments.ts` (images/PDFs → staged files the agent Reads), `transcribe.ts` (voice notes → text). |
 | `src/notion/` | `status.ts` reports whether Notion is configured (a `NOTION_TOKEN` is set). All Notion I/O goes through `scripts/notion.mjs` via Bash. |
 | `src/scheduler/` | `scheduler.ts` (croner reminders) and `server.ts` (the localhost control plane). |

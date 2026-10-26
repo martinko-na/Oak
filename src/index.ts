@@ -6,8 +6,7 @@ import { aggregateStats, readRunRecords } from "./agent/runlog.js";
 import { classifyQuery, runAgent } from "./agent/runner.js";
 import { clearSession, evictExpired, getSession } from "./agent/sessions.js";
 import { googleCalendarConfigured } from "./calendar/status.js";
-import { toPlainText, toTelegramHtml } from "./channel/format.js";
-import { registerBot, sendMessage, splitMessage } from "./channel/notify.js";
+import { deliver, registerBot, sendMessage } from "./channel/notify.js";
 import { isAllowed } from "./channel/permissions.js";
 import { registerTelegramWebhook, startWebhookServer } from "./channel/webhook-server.js";
 import { checkClaudeAuth, config } from "./config.js";
@@ -17,7 +16,6 @@ import { notionConfigured } from "./notion/status.js";
 import { ouraConfigured } from "./oura/status.js";
 import { initScheduler } from "./scheduler/scheduler.js";
 import { startSchedulerServer } from "./scheduler/server.js";
-import { redactSecrets } from "./util/redact.js";
 
 const bot = new Bot(config.telegramBotToken);
 
@@ -283,19 +281,10 @@ bot.on("message", async (ctx) => {
   const userLabel = ctx.from?.username ? `@${ctx.from.username}` : `user ${userId}`;
   let text = ctx.message.text ?? ctx.message.caption ?? "";
 
-  // Send a reply as Telegram HTML, falling back to plain text if Telegram rejects
-  // the entities. All outbound text is scrubbed for secrets first. Defined before
-  // command handling so the built-in commands answer through the same safe path.
-  const replyTo = async (out: string) => {
-    const safe = redactSecrets(out);
-    for (const chunk of splitMessage(safe, 4096)) {
-      try {
-        await ctx.reply(toTelegramHtml(chunk), { parse_mode: "HTML" });
-      } catch {
-        await ctx.reply(toPlainText(chunk));
-      }
-    }
-  };
+  // Send a reply through the shared outbound path (secrets scrubbed, rich message
+  // with HTML and plain-text fallbacks). Defined before command handling so the
+  // built-in commands answer through the same safe path.
+  const replyTo = (out: string) => deliver(ctx.api, ctx.chat.id, out);
 
   // Map a leading slash command to its prompt or built-in action.
   if (text.startsWith("/")) {

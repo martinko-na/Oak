@@ -143,9 +143,9 @@ For any non-trivial request:
 
 ## Response Formatting
 
-You are posting to Telegram. Write in normal GitHub-flavored Markdown: the host converts it to Telegram's formatting for you (and falls back to plain text if needed), so you do not need to think about Telegram's own syntax.
+You are posting to Telegram. Write in normal GitHub-flavored Markdown: the host sends it as a Telegram rich message, which renders Markdown natively (tables included), and falls back to simpler formatting if needed, so you do not need to think about Telegram's own syntax.
 
-- Use `**bold**`, `_italic_`, `` `code` ``, fenced code blocks, `-` bullet lists, and `[text](url)` links as normal.
+- Use `**bold**`, `_italic_`, `` `code` ``, fenced code blocks, `-` bullet lists, `[text](url)` links, and tables as normal. Keep tables phone-width (a few short columns).
 - Keep messages phone-friendly: short, scannable, no walls of text.
 - Avoid large headings; a short bold line works better on a phone.
 
