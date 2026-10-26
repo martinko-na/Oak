@@ -545,7 +545,9 @@ function trackSync(day, ready) {
   const tmp = `${SYNC_LOG_FILE}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(next, null, 2));
   fs.renameSync(tmp, SYNC_LOG_FILE);
-  return next[day];
+  // newlyReady: this call is the first to see the day ready, so nothing has been
+  // sent off the back of it yet (the lunch recap uses it as the morning fallback).
+  return { ...next[day], newlyReady: ready && !log[day]?.firstReadyAt };
 }
 
 // ─── commands ────────────────────────────────────────────────────────────────
