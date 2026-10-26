@@ -93,8 +93,12 @@ long the sync usually takes and move the morning check if needed.
 | `SCHEDULE_FILE` | `./data/schedule.json` | Reminder schedule. |
 | `SESSION_TTL_HOURS` | `12` | How long a conversation stays warm before a fresh session starts. |
 
-In Docker these live on a mounted volume so they survive restarts. The Notion id
-cache (`data/notion-ids.json`) also lives here.
+In Docker these live on the volume mounted at `/data` so they survive restarts.
+The image links `/app/data` to `/data`, so everything the helper scripts write to
+`data/` (Notion id cache, Oura and Google tokens, Oura sync log, nutrition targets,
+run log) lands on the volume too. Set `HOME=/data` (Compose, Cloud Run and Azure
+all do) so the Agent SDK's conversation transcripts under `$HOME/.claude` persist
+as well.
 
 ## Transport mode
 

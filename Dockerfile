@@ -57,6 +57,12 @@ RUN chmod +x entrypoint.sh
 # harmlessly (agent treats PERSONAL.md as missing) when the volume has no copy.
 RUN ln -sf /data/PERSONAL.md /app/PERSONAL.md
 
+# The helper scripts and the run log write their caches and tokens to ./data
+# (Notion ids, Oura and Google tokens, Oura sync log, nutrition targets). Point
+# that at the volume too, or they land in the container layer and vanish on every
+# redeploy (and /app is root-owned, so the first write would fail anyway).
+RUN ln -sfn /data /app/data
+
 # /data is the mountpoint for the persistent volume (sessions + schedule).
 RUN chown -R node:node /app/dist /app/node_modules /app/package.json /app/entrypoint.sh && \
     mkdir -p /home/node/.claude && chown -R node:node /home/node && \

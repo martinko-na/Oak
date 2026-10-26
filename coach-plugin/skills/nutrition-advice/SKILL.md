@@ -10,7 +10,7 @@ Give practical, sustainable food guidance that supports the user's training goal
 ## 1. Gather context
 
 - Read `PERSONAL.md`: goals, body stats, dietary preferences and restrictions, foods they dislike, daily routine, and any nutrition target.
-- Read today's Nutrition Log row before advising, so the advice accounts for what is already eaten: `node scripts/notion.mjs query-recent --db "Nutrition Log" --limit 3`. Advising 180g of protein to someone who has already had 150g is worse than useless.
+- Check what is already eaten today before advising: `node scripts/notion.mjs nutrition-status --date <today>` prints the day's totals and a `Vs target` line (what is left or over, computed in code). Advising 180g of protein to someone who has already had 150g is worse than useless.
 - Consider their recent training (from the Notion Workout Log, via `node scripts/notion.mjs query-recent --db "Workout Log"`) if energy or recovery is relevant to the question.
 
 ## 2. Advise sensibly
@@ -49,6 +49,8 @@ node scripts/notion.mjs recompute-nutrition --date 2026-10-11
 node scripts/notion.mjs set-nutrition-target --kcal 2200 --protein 180
 ```
 
+- After logging a meal, close the reply with where the day stands, using the `Vs target` line `log-meal` prints ("1450 kcal so far, 750 to go. Protein 110g, 70g left: get a solid portion in at dinner"). Turn what is left into one concrete suggestion. Never compute the remainder yourself.
+- Check-ins (lunch recap, evening check): use `nutrition-status --date <today>` and the same rules. On track: one line. Well short of protein late in the day: name one easy food that closes the gap.
 - After any nutrition write, refresh the Dashboard in the same turn:
   `node scripts/notion.mjs sync-dashboard --now <today>`.
 

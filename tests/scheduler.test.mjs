@@ -55,6 +55,18 @@ mock.module("../dist/channel/notify.js", {
   },
 });
 
+// The Oura gate shells out to scripts/oura.mjs; tests decide what it reports.
+let ouraReadyValue = null;
+const ouraChecks = [];
+mock.module("../dist/scheduler/oura-gate.js", {
+  namedExports: {
+    ouraReady: async (date) => {
+      ouraChecks.push(date);
+      return ouraReadyValue;
+    },
+  },
+});
+
 let instance = 0;
 async function loadScheduler(opts = {}) {
   scheduleFile = path.join(TMP_DIR, `schedule-${++instance}.json`);
@@ -64,6 +76,8 @@ async function loadScheduler(opts = {}) {
   if (opts.seed) fs.writeFileSync(scheduleFile, JSON.stringify(opts.seed));
   agentCalls.length = 0;
   sent.length = 0;
+  ouraChecks.length = 0;
+  ouraReadyValue = opts.ouraReady ?? null;
   agentBehaviour = opts.agent ?? (() => ({ text: "session ready" }));
   return import(`../dist/scheduler/scheduler.js?instance=${instance}`);
 }
@@ -313,4 +327,87 @@ test("a disabled task is not scheduled, and disabling a live one stops it", asyn
 
   await new Promise((r) => setTimeout(r, 1200));
   assert.equal(agentCalls.length, callsWhenDisabled);
+});
+
+// ─── Oura gate ────────────────────────────────────────────────────────────────
+
+// 08:00 in London (BST in October), the morning nudge's usual fire time.
+const MORNING = new Date("2026-10-07T07:00:00Z");
+const morningNudge = () => task({ id: "morning-nudge", prompt: "Morning nudge." });
+
+test("nextOuraRetry: hourly until the 12:30 lunch cutoff, local time", async () => {
+  const scheduler = await loadScheduler();
+  const tz = "Europe/London";
+
+  const first = scheduler.nextOuraRetry(MORNING, tz);
+  assert.equal(first.date, "2026-10-07");
+  assert.equal(first.hour, "09");
+  assert.equal(first.at.toISOString(), "2026-10-07T08:00:00.000Z");
+  // 11:29 local + 1h = 12:29, still before lunch; 11:30 + 1h is not.
+  assert.equal(scheduler.nextOuraRetry(new Date("2026-10-07T10:29:00Z"), tz).hour, "12");
+  assert.equal(scheduler.nextOuraRetry(new Date("2026-10-07T10:30:00Z"), tz), null);
+});
+
+test("an unsynced morning wakes no agent, sends nothing, and queues a silent retry", async () => {
+  const scheduler = await loadScheduler({
+    mode: "polling",
+    ouraClientId: "oura",
+    ouraReady: false,
+  });
+  // A future morning, so the queued one-shot is scheduled rather than dropped as stale.
+  const morning = new Date("2099-10-07T07:00:00Z");
+
+  await scheduler.executeTask(morningNudge(), morning);
+
+  assert.deepEqual(ouraChecks, ["2099-10-07"]);
+  assert.equal(agentCalls.length, 0);
+  assert.deepEqual(sent, []);
+  const retry = scheduler.getTask("oura-retry-2099-10-07-09");
+  assert.equal(retry.prompt, "Morning nudge.");
+  assert.equal(retry.runAt, "2099-10-07T08:00:00.000Z");
+  scheduler.removeTask(retry.id); // stop the live one-shot so the test exits
+});
+
+test("an unsynced retry past the cutoff queues nothing more", async () => {
+  const scheduler = await loadScheduler({
+    mode: "polling",
+    ouraClientId: "oura",
+    ouraReady: false,
+  });
+
+  await scheduler.executeTask(
+    task({ id: "oura-retry-2026-10-07-12", prompt: "Morning nudge." }),
+    new Date("2026-10-07T11:00:00Z"),
+  );
+
+  assert.equal(agentCalls.length, 0);
+  assert.deepEqual(scheduler.listTasks(), []);
+});
+
+test("a synced morning, or a failed check, runs the agent as normal", async () => {
+  for (const ouraReady of [true, null]) {
+    const scheduler = await loadScheduler({ mode: "polling", ouraClientId: "oura", ouraReady });
+
+    await scheduler.executeTask(morningNudge(), MORNING);
+
+    assert.equal(agentCalls.length, 1);
+    assert.equal(sent.length, 1);
+    assert.deepEqual(scheduler.listTasks(), []);
+  }
+});
+
+test("the gate is off in webhook mode, without Oura, and for other tasks", async () => {
+  const cases = [
+    { opts: { mode: "webhook", ouraClientId: "oura" }, t: morningNudge() },
+    { opts: { mode: "polling", ouraClientId: "" }, t: morningNudge() },
+    { opts: { mode: "polling", ouraClientId: "oura" }, t: task({ id: "weekly-plan" }) },
+  ];
+  for (const { opts, t } of cases) {
+    const scheduler = await loadScheduler({ ...opts, ouraReady: false });
+
+    await scheduler.executeTask(t, MORNING);
+
+    assert.deepEqual(ouraChecks, []);
+    assert.equal(agentCalls.length, 1);
+  }
 });

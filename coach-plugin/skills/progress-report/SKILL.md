@@ -10,6 +10,7 @@ Turn the Notion Workout Log into an honest, motivating read on how the user is d
 ## 1. Pull the data
 
 - Decide the window from the request (this week, last month, or a sensible default like the last 4 weeks).
+- For a one-week review, start from `node scripts/notion.mjs week-review --end <today>`: it computes the week's counts and averages in code.
 - Query the Notion Workout Log with `node scripts/notion.mjs query-recent --db "Workout Log"` for sessions in that window. Read current Goals and `PERSONAL.md` for what success looks like.
 - Query the Notion Nutrition Log for the same window (`node scripts/notion.mjs query-recent --db "Nutrition Log" --limit 28`) if nutrition is part of what they are working on.
 - If Oura is configured, pull recovery for the same window with `node scripts/oura.mjs trend --end <today> --days <N>` (live from Oura) and read the takeaways in the Notion Recovery database.
